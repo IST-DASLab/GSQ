@@ -117,7 +117,7 @@ pip install -e ".[eval]"                      # optional, for benchmark evaluati
 
 > A HuggingFace account with access to gated models (e.g. Kimi-K2.5) is required for those model families.
 
-GSQ source code lives under [`src/`](src/) (config, trainer, model wrappers, quantizers, MoE ops, GPTQ prior). Training entry point: [`main.py`](main.py); reassembly: [`save_model.py`](save_model.py); evaluation: [`eval_model.py`](eval_model.py). Cluster (Slurm) launch scripts are in [`scripts/`](scripts/) — see [`README_CLARIDEN.md`](README_CLARIDEN.md).
+GSQ source code lives under [`src/`](src/) (config, trainer, model wrappers, quantizers, MoE ops, GPTQ prior). Training entry point: [`main.py`](main.py); reassembly: [`save_model.py`](save_model.py); evaluation: [`eval_model.py`](eval_model.py). Bare-metal entry scripts (no Slurm, no containers) are in [`scripts/`](scripts/) — see "Run GSQ on Your Model" below.
 
 ---
 
@@ -139,23 +139,25 @@ Each run is assigned a unique ID (e.g. `20260306-143025_a1b2c3`) and checkpoints
 torchrun --nproc-per-node=4 main.py --config configs/local/config.yaml
 ```
 
-For multi-node MoE runs (Kimi, Qwen-MoE), distributed env vars are set by Slurm and the wrappers initialize NCCL directly — use the sbatch scripts below rather than `torchrun`.
+For multi-node MoE runs (Kimi, Qwen-MoE), set the standard PyTorch distributed env vars (`WORLD_SIZE`, `RANK`, `LOCAL_RANK`, `MASTER_ADDR`, `MASTER_PORT`) on each node before invoking `bash scripts/run.sh`; the launcher will detect them and skip its built-in `torchrun`. The wrappers initialize NCCL from those env vars directly.
 
 ### Per-model recipes
 
-| Model                                | Config                                                                  | Command                                                          | Approx GPUs                                              |
-|---|---|---|---|
-| Llama-3.1-8B-Instruct                | `configs/local/config.yaml` (set `model.name`)                          | `python main.py --config <cfg>`                                  | 1× H100/A100 (80 GB)                                     |
-| Llama-3.1-70B-Instruct               | `configs/local/config.yaml` (set `model.name`)                          | `torchrun --nproc-per-node=4 main.py --config <cfg>`             | 4× H100 (80 GB)                                          |
-| Qwen3-30B-A3B (Instruct / Thinking)  | `configs/qwen3/qwen3_30B_A3B_*.yaml`                           | `sbatch scripts/run.sbatch.sh`                                  | 4× H200 (single node)                                    |
-| Qwen3-235B-A22B (Instruct / Thinking)| `configs/qwen3/qwen3_235B_A22B_*.yaml`                         | `sbatch scripts/run.sbatch.sh`                                  | 8× H200 (1–2 nodes)                                      |
-| Qwen3.5-35B-A3B                      | `configs/qwen35/qwen35_35B_A3B.yaml`                           | `sbatch scripts/run.sbatch.sh`                                  | 4× H200                                                  |
-| Qwen3.5-122B-A10B                    | `configs/qwen35/qwen35_122B_A10B.yaml`                         | `sbatch scripts/run.sbatch.sh`                                  | 8× H200                                                  |
-| Qwen3.5-397B-A17B                    | `configs/qwen35/qwen35_397B_A17B.yaml`                         | `sbatch scripts/run.sbatch.sh`                                  | 16× H200 (4 nodes); needs `transformers >= 5.3`          |
-| Kimi-K2 (Instruct / Thinking)        | `configs/kimi-k2/kimi_k2_{instruct,thinking}.yaml`             | `sbatch scripts/run.sbatch.sh`                                  | **8× H100/H200 (full node) minimum**                     |
-| Kimi-K2.5 (default target, ~260 GB)  | `configs/kimi-k2.5/kimi_k2.5_2bit_gptq_gsq.yaml`               | `sbatch scripts/run.sbatch.sh`                                  | **8× H100/H200 (full node), typically 1–2 nodes**        |
+The bare-metal entry scripts live under [`scripts/`](scripts/) and are wrappers around `main.py` / `save_model.py` / `eval_model.py`. They activate the local venv (`./.venv` by default), source `.env`, and launch via `torchrun --standalone --nproc-per-node=$(visible GPUs)`.
 
-Edit the `CONFIG=` line at the top of `scripts/run.sbatch.sh` to point at the config you want to run. Resume support, checkpoint reassembly, and benchmark evaluation work the same across all models (see sections below).
+| Model                                | Config                                                          | Command                                                                   | Approx GPUs                                              |
+|---|---|---|---|
+| Llama-3.1-8B-Instruct                | `configs/local/config.yaml` (set `model.name`)                  | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | 1× H100/A100 (80 GB)                                     |
+| Llama-3.1-70B-Instruct               | `configs/local/config.yaml` (set `model.name`)                  | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | 4× H100 (80 GB)                                          |
+| Qwen3-30B-A3B (Instruct / Thinking)  | `configs/qwen3/qwen3_30B_A3B_*.yaml`                            | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | 4× H200 (single node)                                    |
+| Qwen3-235B-A22B (Instruct / Thinking)| `configs/qwen3/qwen3_235B_A22B_*.yaml`                          | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | 8× H200 (single node) or multi-node                      |
+| Qwen3.5-35B-A3B                      | `configs/qwen35/qwen35_35B_A3B.yaml`                            | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | 4× H200                                                  |
+| Qwen3.5-122B-A10B                    | `configs/qwen35/qwen35_122B_A10B.yaml`                          | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | 8× H200                                                  |
+| Qwen3.5-397B-A17B                    | `configs/qwen35/qwen35_397B_A17B.yaml`                          | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | 16× H200 (multi-node); needs `transformers >= 5.3`       |
+| Kimi-K2 (Instruct / Thinking)        | `configs/kimi-k2/kimi_k2_{instruct,thinking}.yaml`              | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | **8× H100/H200 (full node) minimum**                     |
+| Kimi-K2.5 (default target, ~260 GB)  | `configs/kimi-k2.5/kimi_k2.5_2bit_gptq_gsq.yaml`                | `CONFIG_FILE=<cfg> bash scripts/run.sh`                                   | **8× H100/H200 (full node), typically 1–2 nodes**        |
+
+Set `CONFIG_FILE=<path>` (relative to the repo root or absolute), `NPROC=<n>` to override GPU count, `RESUME=latest|<run_id>` to resume, or `SMOKE_TEST=1` for a 2-layer dry run. Resume support, checkpoint reassembly, and benchmark evaluation work the same across all models (see sections below).
 
 #### Kimi-K2.5 ablation configs
 
@@ -187,9 +189,19 @@ The knobs that meaningfully change a run:
 | CLI: `--max-layers N`              | —                                               | Quantize only the first N layers (smoke test)                 |
 | CLI: `--resume [run_id]`           | —                                               | Resume the latest run, or a specific `run_id`                 |
 
-### Cluster (Slurm)
+### Bare-metal entry scripts
 
-> Running on a Slurm cluster (e.g. CSCS Alps / GH200)? See [`README_CLARIDEN.md`](README_CLARIDEN.md) for environment setup, sbatch scripts, and Slurm job submission.
+| Script                          | Purpose                                                         |
+|---|---|
+| `bash scripts/setup_env.sh`     | Create `./.venv`, install GSQ + PyTorch + vLLM (+ flash-attn)   |
+| `bash scripts/download.sh`      | Pre-download HF models and calibration datasets                 |
+| `bash scripts/run.sh`           | Run quantization (single-node multi-GPU via torchrun)           |
+| `bash scripts/save_model.sh`    | Assemble per-layer shards into a HF checkpoint                  |
+| `bash scripts/serve_model.sh`   | Launch a vLLM OpenAI-compatible server (single node)            |
+| `bash scripts/eval_model.sh`    | Run lm-eval benchmarks against a running vLLM server            |
+| `bash scripts/verify_setup.sh`  | Sanity-check the environment + a tiny multi-GPU all-reduce      |
+
+All scripts read knobs from environment variables (e.g. `CONFIG_FILE`, `RUN_ID`, `MODEL_PATH`, `VLLM_URL`, `NPROC`, `SCRATCH`) and forward unknown CLI args to the underlying Python entry point.
 
 ---
 
@@ -277,7 +289,7 @@ python main.py --config configs/local/config.yaml --resume
 python main.py --config configs/local/config.yaml --resume 20260306-143025_a1b2c3
 ```
 
-On the cluster (sbatch), set `RESUME_FROM` in `scripts/run.sbatch.sh` or pass it when submitting: `RESUME_FROM=latest` for the latest run, or `RESUME_FROM=<run_id>` for a specific one. See [`README_CLARIDEN.md`](README_CLARIDEN.md) for details.
+With the bare-metal launcher: `RESUME=latest bash scripts/run.sh` (or `RESUME=<run_id>`).
 
 On resume, the code:
 1. Reads `progress.json` from the run's checkpoint directory.
@@ -435,7 +447,7 @@ GSQ supports distributed training for MoE models via **expert parallelism**: eac
 
 The model is never fully loaded into memory. Only one layer at a time is on GPU, with experts sharded across ranks.
 
-For multi-node Slurm job configuration and cluster-specific scaling numbers, see [`README_CLARIDEN.md`](README_CLARIDEN.md).
+For multi-node bare-metal runs, set `WORLD_SIZE`, `RANK`, `LOCAL_RANK`, `MASTER_ADDR`, and `MASTER_PORT` per node before invoking `bash scripts/run.sh` — the launcher detects them and skips its built-in `torchrun`.
 
 ---
 
