@@ -1,0 +1,76 @@
+# Clariden production config — Qwen3-30B-A3B-Instruct-2507 (MoE)
+# Uses absolute NVMe scratch paths; do not use this config on other machines.
+#
+# Model: Qwen/Qwen3-30B-A3B-Instruct-2507  (model_type: qwen3_moe)
+#   - 128 routed experts, 8 active per token
+#   - 48 decoder layers, decoder_sparse_step=1 (all layers MoE)
+#   - hidden_size=2048, moe_intermediate_size=768
+#   - Identical architecture to Qwen3-30B-A3B base; instruct fine-tune only
+#
+# Scaling guidance (4 GPUs/node):
+#   1 node  ( 4 GPUs) — 32 experts/GPU, ~12h for 48 layers
+#   2 nodes ( 8 GPUs) — 16 experts/GPU, ~6h  for 48 layers
+#   4 nodes (16 GPUs) —  8 experts/GPU, ~3h  for 48 layers
+#
+# Scratch layout:
+#   /iopsstor/scratch/cscs/$USER/
+#     .hf/                                     ← HF_HOME  (set in gsq.toml)
+#     gsq/
+#       checkpoints/qwen3-30b-instruct-2507/   ← per-layer .safetensors shards
+#       logs/qwen3-30b-instruct-2507/          ← Python training logs
+
+model:
+  name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "open_thoughts"
+  batch_size: 64
+  num_samples: 4096
+  max_length: 4096
+  num_workers: 8
+  val_samples: 128
+
+quantization:
+  gsq_bits: 2
+  init_method: "gptq"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.05]
+  scale: [100, 500]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "bfloat16"
+
+training:
+  num_epochs: 10
+  device_microbatch_size: 4
+  masks_lr: 0.0002
+  signs_lr: 0.0001
+  scales_lr: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "/iopsstor/scratch/cscs/stabesh/gsq/checkpoints/qwen3-30b-instruct-2507"
+  log_dir: "/iopsstor/scratch/cscs/stabesh/gsq/logs/qwen3-30b-instruct-2507"
+  act_cache_dir: "/iopsstor/scratch/cscs/stabesh/gsq/act_cache"
+  eval_baseline: true
+  # ppl_eval_every_n_layers: 6
+
+gptq:
+  nsamples: 512
+  wbits: 2
+  sym: true
+  trits: false
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb:
+  enabled: true
+  entity: "ist"
+  project: "GSQ-multi"

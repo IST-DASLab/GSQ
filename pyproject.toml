@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gsq"
+version = "0.1.0"
+description = "Gumbel Softmax Quantization for large language models"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy>=1.26",
+    # HuggingFace ecosystem
+    "transformers<5.0.0",
+    "accelerate>=0.33",
+    "datasets>=2.20",
+    "safetensors>=0.4",
+    "compressed-tensors>=0.7",
+    # Optimizer
+    "lion-pytorch>=0.2",
+    # Experiment tracking
+    "wandb>=0.17",
+    # Utilities
+    "tqdm>=4.66",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "tiktoken>=0.7",
+    "lm-eval[api]>=0.4.11",
+]
+
+[project.optional-dependencies]
+torch = ["torch", "vllm>=0.8", "ray>=2.9"]
+
+[tool.uv]
+cache-dir = "/iopsstor/scratch/cscs/stabesh/.uv-cache"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

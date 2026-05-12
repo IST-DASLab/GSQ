@@ -1,0 +1,57 @@
+# Clariden — Kimi-K2.5 2bit GSQ, random prior, fp32 logits
+# Run #17: gsq_bits=2bit, init_method=random, gsq_enabled=true, logits_dtype=float32
+
+model:
+  name: "/iopsstor/scratch/cscs/stabesh/gsq/models/Kimi-K2.5"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "open_thoughts"
+  batch_size: 64
+  num_samples: 4096
+  max_length: 4096
+  num_workers: 8
+  val_samples: 128
+
+quantization:
+  gsq_bits: 2
+  init_method: "random"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.05]
+  scale: [100, 500]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "float32"
+
+training:
+  num_epochs: 10
+  device_microbatch_size: 2
+  masks_lr: 0.0002
+  signs_lr: 0.0001
+  scales_lr: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "/iopsstor/scratch/cscs/stabesh/gsq/checkpoints/kimi-k2.5-2bit-random-gsq-fp32"
+  log_dir: "/iopsstor/scratch/cscs/stabesh/gsq/logs/kimi-k2.5-2bit-random-gsq-fp32"
+  act_cache_dir: "/iopsstor/scratch/cscs/stabesh/gsq/act_cache"
+  eval_baseline: True
+
+gptq:
+  nsamples: 512
+  wbits: 2
+  sym: true
+  trits: false
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb:
+  enabled: true
+  entity: "ist"
+  project: "GSQ-multi"

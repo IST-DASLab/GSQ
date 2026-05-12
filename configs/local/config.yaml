@@ -1,0 +1,49 @@
+model:
+  name: "moonshotai/Kimi-K2.5"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: 'open_thoughts'
+  batch_size: 64
+  num_samples: 4096
+  max_length: 4096
+  num_workers: 8
+  val_samples: 128
+
+quantization:
+  gsq_bits: 2
+  init_method: "gptq"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: False
+  std: 0.01
+  temperature: [2, 0.05]
+  scale: [100, 500]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "bfloat16"
+
+training:
+  num_epochs: 10
+  device_microbatch_size: 2
+  lr1: 0.0002
+  lr2: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "kimi-k2.5"
+  log_dir: "logs"
+  eval_baseline: True
+
+gptq:
+  nsamples: 512
+  wbits: 2
+  sym: True
+  trits: False
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: False
+  prunen: 0
+  prunem: 0
+
+wandb: True

@@ -1,0 +1,54 @@
+# Low-load real test config — Kimi-K2.5 with actual weights.
+# Loads real shards but keeps samples, sequence length, and epochs minimal
+# so a 2-layer end-to-end run completes in a few minutes on 4 GPUs.
+
+model:
+  name: "/iopsstor/scratch/cscs/stabesh/gsq/models/Kimi-K2.5"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "c4"
+  batch_size: 8
+  num_samples: 32
+  max_length: 512
+  num_workers: 4
+  val_samples: 8
+
+quantization:
+  gsq_bits: 2
+  init_method: "gptq"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.5]
+  scale: [10, 50]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "bfloat16"
+
+training:
+  num_epochs: 1
+  device_microbatch_size: 4
+  masks_lr: 0.0002
+  signs_lr: 0.0001
+  scales_lr: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "/iopsstor/scratch/cscs/stabesh/gsq/checkpoints/kimi-k2.5-lowload"
+  log_dir: "/iopsstor/scratch/cscs/stabesh/gsq/logs/kimi-k2.5-lowload"
+  eval_baseline: True
+
+gptq:
+  nsamples: 32
+  wbits: 2
+  sym: true
+  trits: false
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb: false

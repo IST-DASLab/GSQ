@@ -1,0 +1,50 @@
+model:
+  name: "${SCRATCH}/gsq/models/Llama-3.2-1B"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "c4"
+  batch_size: 8   # must be >= world_size (e.g. 8 GPUs) so per-rank batch >= 1
+  num_samples: 16
+  max_length: 512
+  num_workers: 4
+  val_samples: 8
+
+quantization:
+  gsq_bits: 2
+  init_method: "gptq"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.5]
+  scale: [10, 50]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "bfloat16"
+
+training:
+  num_epochs: 1
+  device_microbatch_size: 4
+  masks_lr: 0.0002
+  signs_lr: 0.0001
+  scales_lr: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "${SCRATCH}/gsq/checkpoints/smoke-job${SLURM_JOB_ID}"
+  log_dir: "${SCRATCH}/gsq/logs/smoke-job${SLURM_JOB_ID}"
+  eval_baseline: True
+
+gptq:
+  nsamples: 16
+  wbits: 2
+  sym: true
+  trits: false
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb: false
