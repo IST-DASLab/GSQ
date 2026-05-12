@@ -72,7 +72,7 @@ The GSQ precision is controlled by the `quantization.gsq_bits` config key:
 | `gsq_bits`    | Quantizer Class          | Bits/weight | Codebook                     | Description                                          |
 |---|---|---|---|---|
 | `2` (default) | `GumbelQuantizer2Bit`    | 2-bit       | `{-2, -1, 0, 1}` × scale     | 4-level integer with learned per-group scale         |
-| `> 2`         | `GumbelQuantizerInt`     | n-bit       | `init + {-2, -1, 0, 1, -2}` × scale     | 5-level integer with learned per-group scale         |
+| `> 2`         | `GumbelQuantizerInt`     | n-bit       | `(init + {-2, -1, 0, 1, -2})` × scale     | 5-level integer with learned per-group scale         |
 | `"ternary"`   | `GumbelQuantizerTernary` | ~1.58-bit   | `{-1, 0, +1}` × scale        | Separate sign and mask logits with learned scale     |
 
 ---
