@@ -169,7 +169,7 @@ The knobs that meaningfully change a run:
 
 | Key                                | Values / default                                | Effect                                                        |
 |---|---|---|
-| `quantization.gsq_bits`            | `1` / `2` (default) / `"ternary"`               | Selects the GSQ quantizer / target precision                  |
+| `quantization.gsq_bits`            | `1` / `2` (default) / `3` / `4` / `"ternary"`               | Selects the GSQ quantizer / target precision                  |
 | `quantization.init_method`         | `"gptq"` (default) / `"rtn"`                    | Initialization before GSQ refinement                          |
 | `quantization.gsq_enabled`         | `true` (default) / `false`                      | `false` = init-only run (baseline; tagged `gptq+nogsq`)        |
 | `quantization.logits_dtype`        | `"bfloat16"` (default) / `"float32"`            | Precision of `sign_logits`, `mask_logits`, `quant_logits`     |
