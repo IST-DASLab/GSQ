@@ -59,7 +59,7 @@ GSQ quantizes LLM weights **layer by layer** using a two-stage pipeline:
 For each linear layer $f(x; w)$, GSQ minimizes the layer-wise reconstruction error
 
 $$
-\hat{w} \;=\; \arg\min_{\tilde{w}} \, \lVert f(x;\tilde{w}) - f(x;w) \rVert_F^2
+\hat{w} = \arg\min_{\tilde{w}} \lVert f(x;\tilde{w}) - f(x;w) \rVert_F^2
 \quad \text{s.t.} \quad \tilde{w} \in \mathcal{C},
 $$
 
