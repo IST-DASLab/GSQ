@@ -1,0 +1,57 @@
+# Production config — Kimi-K2.5 ternary GSQ, rtn prior, fp32 logits
+# Run #10: gsq_bits=ternary, init_method=rtn, gsq_enabled=true, logits_dtype=float32
+
+model:
+  name: "moonshotai/Kimi-K2.5"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "open_thoughts"
+  batch_size: 64
+  num_samples: 4096
+  max_length: 4096
+  num_workers: 8
+  val_samples: 128
+
+quantization:
+  gsq_bits: "ternary"
+  init_method: "rtn"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.05]
+  scale: [100, 500]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "float32"
+
+training:
+  num_epochs: 10
+  device_microbatch_size: 2
+  masks_lr: 0.0002
+  signs_lr: 0.0001
+  scales_lr: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "checkpoints/kimi-k2.5-ternary-rtn-gsq-fp32"
+  log_dir: "logs/kimi-k2.5-ternary-rtn-gsq-fp32"
+  act_cache_dir: "cache/act_cache"
+  eval_baseline: True
+
+gptq:
+  nsamples: 512
+  wbits: 2
+  sym: true
+  trits: true
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb:
+  enabled: true
+  entity: "ist"
+  project: "GSQ-multi"

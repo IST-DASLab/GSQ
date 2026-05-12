@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Launch vLLM server after waiting for the Ray cluster to be ready.
-Used by clariden/serve_model.sbatch.sh on the head node: waits for all Ray
+Used by scripts/serve_model.sbatch.sh on the head node: waits for all Ray
 nodes, starts vllm serve in the background, polls /health, runs one
 completions test, then blocks until the server exits.
 """

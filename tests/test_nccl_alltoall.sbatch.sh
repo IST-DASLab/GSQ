@@ -15,9 +15,10 @@
 set -euo pipefail
 ulimit -c 0
 
-SCRIPT_ROOT="${HOME}/iopsstor/workspace/GSQ-Dev"
-EDF_FILE="${SCRIPT_ROOT}/clariden/gsq.toml"
-SCRATCH="/iopsstor/scratch/cscs/${USER}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+EDF_FILE="${SCRIPT_ROOT}/scripts/gsq.toml"
+SCRATCH="${SCRATCH:-"${SCRIPT_ROOT}/runtime"}"
 VENV_PATH="${SCRATCH}/gsq/venv-gsq"
 
 if [ -f "${SCRIPT_ROOT}/.env" ]; then

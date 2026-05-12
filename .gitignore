@@ -45,6 +45,9 @@ wandb/
 checkpoints/
 logs/
 *.log
+runtime/
+archives/
+cache/
 
 # Local config overrides (optional; remove if you want config tracked)
 # config/local*.yaml

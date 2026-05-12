@@ -1,6 +1,6 @@
 """Run lm-evaluation-harness benchmarks against a vLLM server and log results to WandB.
 
-Assumes a vLLM-compatible server is already running (see clariden/serve_model.sbatch.sh
+Assumes a vLLM-compatible server is already running (see scripts/serve_model.sbatch.sh
 or start one locally with `vllm serve`).
 
 Usage:

@@ -117,7 +117,7 @@ pip install -e ".[eval]"                      # optional, for benchmark evaluati
 
 > A HuggingFace account with access to gated models (e.g. Kimi-K2.5) is required for those model families.
 
-GSQ source code lives under [`src/`](src/) (config, trainer, model wrappers, quantizers, MoE ops, GPTQ prior). Training entry point: [`main.py`](main.py); reassembly: [`save_model.py`](save_model.py); evaluation: [`eval_model.py`](eval_model.py). Cluster (Slurm) launch scripts are in [`clariden/`](clariden/) — see [`README_CLARIDEN.md`](README_CLARIDEN.md).
+GSQ source code lives under [`src/`](src/) (config, trainer, model wrappers, quantizers, MoE ops, GPTQ prior). Training entry point: [`main.py`](main.py); reassembly: [`save_model.py`](save_model.py); evaluation: [`eval_model.py`](eval_model.py). Cluster (Slurm) launch scripts are in [`scripts/`](scripts/) — see [`README_CLARIDEN.md`](README_CLARIDEN.md).
 
 ---
 
@@ -147,19 +147,19 @@ For multi-node MoE runs (Kimi, Qwen-MoE), distributed env vars are set by Slurm 
 |---|---|---|---|
 | Llama-3.1-8B-Instruct                | `configs/local/config.yaml` (set `model.name`)                          | `python main.py --config <cfg>`                                  | 1× H100/A100 (80 GB)                                     |
 | Llama-3.1-70B-Instruct               | `configs/local/config.yaml` (set `model.name`)                          | `torchrun --nproc-per-node=4 main.py --config <cfg>`             | 4× H100 (80 GB)                                          |
-| Qwen3-30B-A3B (Instruct / Thinking)  | `configs/clariden/qwen3/qwen3_30B_A3B_*.yaml`                           | `sbatch clariden/run.sbatch.sh`                                  | 4× H200 (single node)                                    |
-| Qwen3-235B-A22B (Instruct / Thinking)| `configs/clariden/qwen3/qwen3_235B_A22B_*.yaml`                         | `sbatch clariden/run.sbatch.sh`                                  | 8× H200 (1–2 nodes)                                      |
-| Qwen3.5-35B-A3B                      | `configs/clariden/qwen35/qwen35_35B_A3B.yaml`                           | `sbatch clariden/run.sbatch.sh`                                  | 4× H200                                                  |
-| Qwen3.5-122B-A10B                    | `configs/clariden/qwen35/qwen35_122B_A10B.yaml`                         | `sbatch clariden/run.sbatch.sh`                                  | 8× H200                                                  |
-| Qwen3.5-397B-A17B                    | `configs/clariden/qwen35/qwen35_397B_A17B.yaml`                         | `sbatch clariden/run.sbatch.sh`                                  | 16× H200 (4 nodes); needs `transformers >= 5.3`          |
-| Kimi-K2 (Instruct / Thinking)        | `configs/clariden/kimi-k2/kimi_k2_{instruct,thinking}.yaml`             | `sbatch clariden/run.sbatch.sh`                                  | **8× H100/H200 (full node) minimum**                     |
-| Kimi-K2.5 (default target, ~260 GB)  | `configs/clariden/kimi-k2.5/kimi_k2.5_2bit_gptq_gsq.yaml`               | `sbatch clariden/run.sbatch.sh`                                  | **8× H100/H200 (full node), typically 1–2 nodes**        |
+| Qwen3-30B-A3B (Instruct / Thinking)  | `configs/qwen3/qwen3_30B_A3B_*.yaml`                           | `sbatch scripts/run.sbatch.sh`                                  | 4× H200 (single node)                                    |
+| Qwen3-235B-A22B (Instruct / Thinking)| `configs/qwen3/qwen3_235B_A22B_*.yaml`                         | `sbatch scripts/run.sbatch.sh`                                  | 8× H200 (1–2 nodes)                                      |
+| Qwen3.5-35B-A3B                      | `configs/qwen35/qwen35_35B_A3B.yaml`                           | `sbatch scripts/run.sbatch.sh`                                  | 4× H200                                                  |
+| Qwen3.5-122B-A10B                    | `configs/qwen35/qwen35_122B_A10B.yaml`                         | `sbatch scripts/run.sbatch.sh`                                  | 8× H200                                                  |
+| Qwen3.5-397B-A17B                    | `configs/qwen35/qwen35_397B_A17B.yaml`                         | `sbatch scripts/run.sbatch.sh`                                  | 16× H200 (4 nodes); needs `transformers >= 5.3`          |
+| Kimi-K2 (Instruct / Thinking)        | `configs/kimi-k2/kimi_k2_{instruct,thinking}.yaml`             | `sbatch scripts/run.sbatch.sh`                                  | **8× H100/H200 (full node) minimum**                     |
+| Kimi-K2.5 (default target, ~260 GB)  | `configs/kimi-k2.5/kimi_k2.5_2bit_gptq_gsq.yaml`               | `sbatch scripts/run.sbatch.sh`                                  | **8× H100/H200 (full node), typically 1–2 nodes**        |
 
-Edit the `CONFIG=` line at the top of `clariden/run.sbatch.sh` to point at the config you want to run. Resume support, checkpoint reassembly, and benchmark evaluation work the same across all models (see sections below).
+Edit the `CONFIG=` line at the top of `scripts/run.sbatch.sh` to point at the config you want to run. Resume support, checkpoint reassembly, and benchmark evaluation work the same across all models (see sections below).
 
 #### Kimi-K2.5 ablation configs
 
-The `configs/clariden/kimi-k2.5/` directory ships with a full sweep that's already been used in the paper experiments:
+The `configs/kimi-k2.5/` directory ships with a full sweep that's already been used in the paper experiments:
 
 - Bit width: `kimi_k2.5_2bit_gptq_gsq.yaml`, `kimi_k2.5_3bit_gptq_gsq.yaml`, `kimi_k2.5_ternary_gptq_gsq.yaml`
 - Init: `kimi_k2.5_2bit_rtn_gsq.yaml`, `kimi_k2.5_3bit_rtn_gsq.yaml`, `kimi_k2.5_ternary_rtn_gsq.yaml`
@@ -187,15 +187,15 @@ The knobs that meaningfully change a run:
 | CLI: `--max-layers N`              | —                                               | Quantize only the first N layers (smoke test)                 |
 | CLI: `--resume [run_id]`           | —                                               | Resume the latest run, or a specific `run_id`                 |
 
-### Cluster (Clariden)
+### Cluster (Slurm)
 
-> Running on the CSCS Clariden HPC cluster? See [`README_CLARIDEN.md`](README_CLARIDEN.md) for environment setup, sbatch scripts, and Slurm job submission.
+> Running on a Slurm cluster (e.g. CSCS Alps / GH200)? See [`README_CLARIDEN.md`](README_CLARIDEN.md) for environment setup, sbatch scripts, and Slurm job submission.
 
 ---
 
 ## Configuration Reference
 
-All training parameters are controlled via a single YAML file. Configs are loaded with strict validation (`src.config.load_config`): unknown top-level sections or unknown keys within a section raise an error. Omitted keys use defaults (see `src/config.py` or the commented defaults in `configs/clariden/kimi-k2.5/kimi_k2.5_2bit_gptq_gsq.yaml`). The default config path is `configs/local/config.yaml`:
+All training parameters are controlled via a single YAML file. Configs are loaded with strict validation (`src.config.load_config`): unknown top-level sections or unknown keys within a section raise an error. Omitted keys use defaults (see `src/config.py` or the commented defaults in `configs/kimi-k2.5/kimi_k2.5_2bit_gptq_gsq.yaml`). The default config path is `configs/local/config.yaml`:
 
 ```yaml
 model:
@@ -277,7 +277,7 @@ python main.py --config configs/local/config.yaml --resume
 python main.py --config configs/local/config.yaml --resume 20260306-143025_a1b2c3
 ```
 
-On Clariden (sbatch), set `RESUME_FROM` in `clariden/run.sbatch.sh` or pass it when submitting: `RESUME_FROM=latest` for the latest run, or `RESUME_FROM=<run_id>` for a specific one. See [`README_CLARIDEN.md`](README_CLARIDEN.md) for details.
+On the cluster (sbatch), set `RESUME_FROM` in `scripts/run.sbatch.sh` or pass it when submitting: `RESUME_FROM=latest` for the latest run, or `RESUME_FROM=<run_id>` for a specific one. See [`README_CLARIDEN.md`](README_CLARIDEN.md) for details.
 
 On resume, the code:
 1. Reads `progress.json` from the run's checkpoint directory.

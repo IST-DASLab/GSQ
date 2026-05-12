@@ -1,0 +1,80 @@
+# Production config — Qwen3.5-397B-A17B (MoE)
+# Uses paths relative to the working directory; set SCRATCH in the environment on HPC for large-artifact layout.
+#
+# Model: Qwen/Qwen3.5-397B-A17B
+#   Architecture confirmed via AutoConfig (transformers 5.3.0, Qwen3_5MoeConfig):
+#   - Routed experts: TBD for 397B (35B-A3B has 256; 397B will differ — check num_experts)
+#   - num_hidden_layers: TBD for 397B (35B-A3B has 40)
+#   - 8 active experts per token (num_experts_per_tok)
+#   - Hybrid attention: layer_types list, "linear_attention" (GatedDeltaNet) + "full_attention" (every 4th)
+#   - Shared expert per layer: shared_expert + shared_expert_gate (Linear, sigmoid gated)
+#   - Expert weights: 3D fused tensors gate_up_proj[E, 2*I, H] / down_proj[E, H, I]
+#   - Expert intermediate size: moe_intermediate_size (not intermediate_size)
+#
+# Scaling guidance (4 GPUs/node) — update once 397B expert count is known:
+#   Aim for ~16–32 experts/GPU. With 8 nodes (32 GPUs): 397B run in ~12-24h.
+#
+# NOTE: Requires transformers >= 5.3.0 for Qwen3.5 MoE support.
+#
+# Scratch layout:
+#   With SCRATCH set (e.g. by scripts/run.sbatch.sh), artifacts also use runtime/gsq/
+#     .hf/                            ← HF_HOME  (set in gsq.toml)
+#     gsq/
+#       checkpoints/qwen35-397b/      ← per-layer .safetensors shards (active run)
+#       logs/qwen35-397b/             ← Python training logs
+
+model:
+  name: "Qwen/Qwen3.5-397B-A17B"
+  device: "cuda"
+  dtype: "bfloat16"
+
+data:
+  dataset_name: "open_thoughts"
+  batch_size: 64
+  num_samples: 4096
+  max_length: 4096
+  num_workers: 8
+  val_samples: 128
+
+quantization:
+  gsq_bits: 2
+  init_method: "gptq"
+  gsq_enabled: true
+  start_layer: 0
+  self_attn: false
+  std: 0.01
+  temperature: [2, 0.05]
+  scale: [100, 500]
+  groupsize: 128
+  strength: 6
+  logits_dtype: "bfloat16"
+
+training:
+  num_epochs: 10
+  device_microbatch_size: 2
+  masks_lr: 0.0002
+  signs_lr: 0.0001
+  scales_lr: 0.0001
+  weight_decay: 1.0
+  checkpoint_dir: "checkpoints/qwen35-397b"
+  log_dir: "logs/qwen35-397b"
+  act_cache_dir: "cache/act_cache"
+  eval_baseline: true
+  # ppl_eval_every_n_layers: 6
+
+gptq:
+  nsamples: 512
+  wbits: 2
+  sym: true
+  trits: false
+  percdamp: 0.1
+  blocksize: 128
+  groupsize: 128
+  static_groups: false
+  prunen: 0
+  prunem: 0
+
+wandb:
+  enabled: true
+  entity: "ist"
+  project: "GSQ-multi"
