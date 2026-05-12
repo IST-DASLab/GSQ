@@ -71,17 +71,9 @@ The GSQ precision is controlled by the `quantization.gsq_bits` config key:
 
 | `gsq_bits`    | Quantizer Class          | Bits/weight | Codebook                     | Description                                          |
 |---|---|---|---|---|
-| `1`           | `GumbelQuantizer1Bit`    | 1-bit       | `{0, 1}` × scale             | Binary weights with learned per-group scale          |
 | `2` (default) | `GumbelQuantizer2Bit`    | 2-bit       | `{-2, -1, 0, 1}` × scale     | 4-level integer with learned per-group scale         |
+| `> 2`         | `GumbelQuantizerInt`     | n-bit       | `init + {-2, -1, 0, 1, -2}` × scale     | 5-level integer with learned per-group scale         |
 | `"ternary"`   | `GumbelQuantizerTernary` | ~1.58-bit   | `{-1, 0, +1}` × scale        | Separate sign and mask logits with learned scale     |
-
-Additional quantizer classes exist but are not yet exposed via `gsq_bits`:
-
-| Quantizer Class       | Description                                              |
-|---|---|
-| `GumbelQuantizer`     | N:M structured sparsity with pattern-based masks         |
-| `GumbelQuantizerInt`  | Integer shift-based quantization around the GPTQ init    |
-| `GumbelQuantizer24`   | NVIDIA 2:4 structured sparsity                           |
 
 ---
 
@@ -89,10 +81,12 @@ Additional quantizer classes exist but are not yet exposed via `gsq_bits`:
 
 | Model Family          | Wrapper                                                | Notes                                                                  |
 |---|---|---|
-| Meta OPT              | `OPTWrapper`                                           | Dense                                                                  |
 | Meta LLaMA            | `LLaMAWrapper`                                         | Dense                                                                  |
+| Qwen3            | `Qwen3Wrapper`                                         | Dense                                                                  |
 | Qwen3-MoE             | `Qwen3MoeWrapper` / `Qwen3MoeDistributedWrapper`       | MoE, expert-parallel, 128 experts (Qwen3-235B-A22B and Qwen3-30B-A3B)  |
-| Qwen3.5-MoE           | `Qwen35MoeWrapper` / `Qwen35MoeDistributedWrapper`     | MoE, hybrid attention, shared experts (35B-A3B / 122B-A10B / 397B-A17B)|
+| Qwen3.5/3.6            | `Qwen35Wrapper`                                         | Dense                                                                  |
+| Qwen3.5/3.6-MoE           | `Qwen35MoeWrapper` / `Qwen35MoeDistributedWrapper`     | MoE, hybrid attention, shared experts (35B-A3B / 122B-A10B / 397B-A17B)|
+| Gemma-4-35B            | `Gemma4Wrapper`                                         | Dense                                                                  |
 | Kimi K2 / K2.5        | `KimiK2Wrapper` / `KimiK2DistributedWrapper`           | MoE, expert-parallel; K2.5 has 384 experts (~260 GB)                    |
 
 **Qwen3.5-MoE** requires `transformers >= 5.3` (this currently conflicts with Kimi-K2.5; swap as needed per run).
@@ -439,7 +433,7 @@ GSQ supports distributed training for MoE models via **expert parallelism**: eac
 
 | Model              | Architecture                       | Recommended Setup           |
 |---|---|---|
-| LLaMA, OPT         | Dense                              | 1 GPU (8B) / 4 GPUs (70B)   |
+| LLaMA, Qwen, Gemma         | Dense                              | 1 GPU (8B) / 4 GPUs (70B)   |
 | Qwen3-30B-A3B      | MoE (128 experts)                  | 4 GPUs (single node)         |
 | Qwen3-235B-A22B    | MoE (128 experts)                  | 8–32 GPUs (2–8 nodes)        |
 | Qwen3.5-397B-A17B  | MoE (512 experts, hybrid attn)     | 16–64 GPUs (4–16 nodes)      |
