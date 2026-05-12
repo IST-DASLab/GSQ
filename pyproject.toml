@@ -32,9 +32,6 @@ dependencies = [
 [project.optional-dependencies]
 torch = ["torch", "vllm>=0.8", "ray>=2.9"]
 
-[tool.uv]
-cache-dir = "/iopsstor/scratch/cscs/stabesh/.uv-cache"
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
