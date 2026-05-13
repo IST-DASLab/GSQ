@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 from transformers import AutoConfig, AutoModelForCausalLM  
+from safetensors import safe_open
 from safetensors.torch import load_file as safe_load_file
 from safetensors.torch import save_file as safe_save_file
 from compressed_tensors import PackedQuantizationCompressor
@@ -186,13 +187,13 @@ class BaseModelWrapper(ABC):
             by_shard.setdefault(s, []).append(n)
 
         for shard, names in by_shard.items():
-            tensors = safe_load_file(shard, device="cpu")
-            for n in names:
-                if n.endswith("inv_freq"):
-                    continue
-                t = tensors[n].to(dtype=self.dtype, copy=False)
-                n = n.replace(".language_model", "")
-                set_module_tensor_to_device(self.model, n, self.device, value=t, dtype=self.dtype)
+            with safe_open(shard, framework="pt", device=str(self.device)) as f:
+                for ckpt_name in names:
+                    if ckpt_name.endswith("inv_freq"):
+                        continue
+                    t = f.get_tensor(ckpt_name)
+                    model_name = ckpt_name.replace(".language_model", "")
+                    set_module_tensor_to_device(self.model, model_name, self.device, value=t, dtype=t.dtype)
 
     def move_layer_to_gpu(self, layer_name):
         prefixes = self._layer_prefixes(layer_name)
