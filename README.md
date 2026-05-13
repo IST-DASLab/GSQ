@@ -95,19 +95,35 @@ The GSQ precision is controlled by the `quantization.gsq_bits` config key:
 
 ## Installation
 
-```bash
-git clone --recurse-submodules https://github.com/your-org/GSQ-Dev.git
-cd GSQ-Dev
-pip install -e .
-```
-
-PyTorch with CUDA must be installed separately:
+GSQ uses **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for environment management. Install it first:
 
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install flash-attn --no-build-isolation   # optional, for flash-attention-2
-pip install -e ".[eval]"                      # optional, for benchmark evaluation (lm-eval + vLLM)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
+
+Then clone and run the setup script:
+
+```bash
+git clone https://github.com/IST-DASLab/GSQ.git
+cd GSQ
+bash scripts/setup_env.sh        # uv sync + flash-attn + import sanity check
+```
+
+`scripts/setup_env.sh` runs `uv sync` to create `./.venv` from [`uv.lock`](uv.lock) (PyTorch, vLLM, lm-eval, and the rest of the runtime stack), installs `flash-attn` on top, and verifies that all required packages import. Override defaults with `VENV_PATH=<path>`, `PYTHON_VERSION=3.11`, `SKIP_FLASH_ATTN=1`, or `TORCH_CUDA=cu124` (default is `cu128`, pinned in [`pyproject.toml`](pyproject.toml) under `[[tool.uv.index]]`).
+
+If you prefer to manage the venv by hand:
+
+```bash
+uv sync                                                  # locked deps -> ./.venv
+uv pip install flash-attn --no-cache-dir --no-build-isolation
+
+# Different CUDA target (e.g. cu124 instead of the default cu128):
+UV_INDEX_PYTORCH=https://download.pytorch.org/whl/cu124 uv sync
+```
+
+The PyTorch wheel index is pinned via `[[tool.uv.index]]` in `pyproject.toml`; override it with `UV_INDEX_PYTORCH=<url>` (or pass `TORCH_CUDA=cu124` to `setup_env.sh`).
+
+The `scripts/*.sh` helpers activate `./.venv` automatically; `source .venv/bin/activate` is only needed for an interactive shell.
 
 > A HuggingFace account with access to gated models (e.g. Kimi-K2.5) is required for those model families.
 
@@ -120,9 +136,12 @@ GSQ source code lives under [`src/`](src/) (config, trainer, model wrappers, qua
 ### Quick start (local, single GPU)
 
 ```bash
-python main.py --config configs/local/config.yaml
-# Smoke test — first 2 layers only:
-python main.py --config configs/local/config.yaml --max-layers 2
+bash scripts/run.sh                         # default config, all visible GPUs
+SMOKE_TEST=1 bash scripts/run.sh            # 2-layer smoke test
+
+# Or invoke main.py directly via uv (no activation needed):
+uv run python main.py --config configs/local/config.yaml
+uv run python main.py --config configs/local/config.yaml --max-layers 2
 ```
 
 Each run is assigned a unique ID (e.g. `20260306-143025_a1b2c3`) and checkpoints are stored under `training.checkpoint_dir/<run_id>/`. The run ID is printed at startup and logged to WandB.
@@ -130,7 +149,9 @@ Each run is assigned a unique ID (e.g. `20260306-143025_a1b2c3`) and checkpoints
 ### Multi-GPU on one node (dense models)
 
 ```bash
-torchrun --nproc-per-node=4 main.py --config configs/local/config.yaml
+NPROC=4 bash scripts/run.sh
+# Or directly:
+uv run torchrun --standalone --nproc-per-node=4 main.py --config configs/local/config.yaml
 ```
 
 For multi-node MoE runs (Kimi, Qwen-MoE), set the standard PyTorch distributed env vars (`WORLD_SIZE`, `RANK`, `LOCAL_RANK`, `MASTER_ADDR`, `MASTER_PORT`) on each node before invoking `bash scripts/run.sh`; the launcher will detect them and skip its built-in `torchrun`. The wrappers initialize NCCL from those env vars directly.
@@ -185,9 +206,10 @@ The knobs that meaningfully change a run:
 
 ### Bare-metal entry scripts
 
-| Script                          | Purpose                                                         |
+| Script / command                | Purpose                                                         |
 |---|---|
-| `bash scripts/setup_env.sh`     | Create `./.venv`, install GSQ + PyTorch + vLLM (+ flash-attn)   |
+| `bash scripts/setup_env.sh`     | `uv sync` + flash-attn + import sanity check (one-shot setup)  |
+| `uv sync`                       | Just refresh `./.venv` from `uv.lock` (no flash-attn, no checks) |
 | `bash scripts/download.sh`      | Pre-download HF models and calibration datasets                 |
 | `bash scripts/run.sh`           | Run quantization (single-node multi-GPU via torchrun)           |
 | `bash scripts/save_model.sh`    | Assemble per-layer shards into a HF checkpoint                  |
@@ -353,7 +375,7 @@ python eval_model.py --config configs/local/config.yaml \
 
 Default tasks: GSM8k, ARC-Challenge, ARC-Easy, Winogrande, PIQA. Results are logged to the same WandB run under the `eval/` prefix.
 
-Install eval dependencies with: `pip install -e ".[eval]"`
+Benchmark clients (lm-eval, vLLM) are already listed in `pyproject.toml` and are installed by `uv sync` / `scripts/setup_env.sh`.
 
 ---
 

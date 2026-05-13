@@ -1,69 +1,69 @@
 #!/usr/bin/env bash
 # ============================================================================
-# GSQ — bare-metal environment setup
+# GSQ — bare-metal environment setup (uv)
 # ============================================================================
-# Creates a host Python venv at ${VENV_PATH:-./.venv}, installs GSQ in editable
-# mode together with PyTorch, vLLM, lm-eval, and (optionally) flash-attn.
+# Creates a project venv at ${VENV_PATH:-./.venv} via uv and installs GSQ in
+# editable mode. Locked dependencies come from uv.lock; flash-attn is added on
+# top (it cannot live in the lock because it requires --no-build-isolation).
 #
 # Usage:
-#   bash scripts/setup_env.sh                # default: install everything
-#   SKIP_FLASH_ATTN=1 bash scripts/setup_env.sh
-#   VENV_PATH=/path/to/venv bash scripts/setup_env.sh
-#   PYTHON=python3.11 bash scripts/setup_env.sh
+#   bash scripts/setup_env.sh                       # default: full install
+#   SKIP_FLASH_ATTN=1 bash scripts/setup_env.sh     # skip flash-attn build
+#   PYTHON_VERSION=3.11 bash scripts/setup_env.sh   # pin Python version
+#   VENV_PATH=/data/venvs/gsq bash scripts/setup_env.sh
+#   TORCH_CUDA=cu124 bash scripts/setup_env.sh      # override torch wheel index
+#                                                   #   (default: cu128 from pyproject.toml)
+#
+# Requires uv. Install with:
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
 # ============================================================================
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PATH="${VENV_PATH:-${REPO_ROOT}/.venv}"
-PYTHON="${PYTHON:-python3}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 SKIP_FLASH_ATTN="${SKIP_FLASH_ATTN:-0}"
-TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+TORCH_CUDA="${TORCH_CUDA:-}"
+if [[ -n "${TORCH_CUDA}" ]]; then
+    export UV_INDEX_PYTORCH="https://download.pytorch.org/whl/${TORCH_CUDA}"
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ERROR: uv is not installed. Install with:" >&2
+    echo "  curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    exit 1
+fi
 
 echo "=========================================="
-echo "GSQ — host venv setup"
+echo "GSQ — uv environment setup"
 echo "Repo root  : ${REPO_ROOT}"
 echo "Venv path  : ${VENV_PATH}"
-echo "Python     : $(${PYTHON} --version)"
-echo "Torch idx  : ${TORCH_INDEX_URL}"
+echo "Python     : ${PYTHON_VERSION}"
+echo "uv         : $(uv --version)"
+echo "torch idx  : ${UV_INDEX_PYTORCH:-<from pyproject.toml: cu128>}"
 echo "flash-attn : $([ "${SKIP_FLASH_ATTN}" = "1" ] && echo SKIP || echo INSTALL)"
 echo "=========================================="
 
-if [[ ! -d "${VENV_PATH}" ]]; then
-    echo "[1/5] Creating venv at ${VENV_PATH}..."
-    "${PYTHON}" -m venv "${VENV_PATH}"
-else
-    echo "[1/5] Reusing existing venv at ${VENV_PATH}"
-fi
+cd "${REPO_ROOT}"
+export UV_PROJECT_ENVIRONMENT="${VENV_PATH}"
 
-# shellcheck disable=SC1091
-source "${VENV_PATH}/bin/activate"
-echo "      Active python: $(which python) — $(python --version)"
-
-echo "[2/5] Upgrading pip / setuptools / wheel..."
-pip install --upgrade pip setuptools wheel --quiet
-
-echo "[3/5] Installing PyTorch (${TORCH_INDEX_URL})..."
-if ! python -c "import torch" 2>/dev/null; then
-    pip install torch torchvision torchaudio --index-url "${TORCH_INDEX_URL}"
-else
-    echo "      torch already installed: $(python -c 'import torch; print(torch.__version__)')"
-fi
-
-echo "[4/5] Installing GSQ (editable) + vLLM + lm-eval..."
-pip install -e "${REPO_ROOT}[torch]"
+echo "[1/3] Syncing project dependencies (uv sync)..."
+uv sync --python "${PYTHON_VERSION}"
 
 if [[ "${SKIP_FLASH_ATTN}" != "1" ]]; then
-    echo "      Installing flash-attn (this can take a while; set SKIP_FLASH_ATTN=1 to skip)..."
+    echo "[2/3] Installing flash-attn (no-build-isolation)..."
     export MAX_JOBS="${MAX_JOBS:-8}"
-    pip install flash-attn --no-cache-dir --no-build-isolation || {
-        echo "      WARNING: flash-attn install failed. Continuing without it."
+    uv pip install flash-attn --no-cache-dir --no-build-isolation || {
+        echo "      WARNING: flash-attn install failed. Continuing without it." >&2
     }
+else
+    echo "[2/3] Skipping flash-attn (SKIP_FLASH_ATTN=1)"
 fi
 
-echo "[5/5] Verifying installed packages..."
+echo "[3/3] Verifying installed packages..."
 echo "=========================================="
-python - <<'PYEOF'
+uv run --no-sync python - <<'PYEOF'
 import sys
 errors = []
 
@@ -116,6 +116,10 @@ PYEOF
 
 echo "=========================================="
 echo "Setup complete."
+echo ""
 echo "Activate the venv with:"
 echo "  source ${VENV_PATH}/bin/activate"
+echo ""
+echo "Or run any command via uv (no activation needed):"
+echo "  uv run python main.py --config configs/local/config.yaml"
 echo "=========================================="
