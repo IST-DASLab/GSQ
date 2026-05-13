@@ -78,6 +78,7 @@ class Gemma4Wrapper(BaseModelWrapper):
         inputs["position_embeddings"] = self.position_embeddings[
             self.model.config.layer_types[self.current_layer_idx]
         ]
+        inputs["shared_kv_states"] = {}
         return inputs
     
     def get_mlp_input(self, batch):
