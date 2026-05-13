@@ -34,18 +34,31 @@ EVAL="${EVAL:-0}"
 EVAL_CONFIG_FILE="${EVAL_CONFIG_FILE:-configs/local/config.yaml}"
 EVAL_TASKS="${EVAL_TASKS:-gsm8k,arc_challenge,arc_easy,winogrande,piqa}"
 EVAL_NUM_CONCURRENT="${EVAL_NUM_CONCURRENT:-8}"
+EVAL_LIMIT="${EVAL_LIMIT:-}"
 EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-}"
 EVAL_WANDB_FLAG="${EVAL_WANDB_FLAG:-}"
 
 # Resolve MODEL_PATH from RUN_ID if needed.
+# Search both ${SCRATCH}/gsq/checkpoints (legacy / user-overridden SCRATCH) and
+# ${REPO_ROOT}/runtime/gsq/checkpoints (config default). The user's SCRATCH may
+# point outside the repo; assembled checkpoints live in the repo by config.
 if [[ -z "${MODEL_PATH}" ]]; then
     if [[ -z "${RUN_ID}" ]]; then
         echo "ERROR: set MODEL_PATH or RUN_ID before running." >&2
         exit 1
     fi
-    CANDIDATE_DIR=$(find "${SCRATCH}/gsq/checkpoints" -type d -path "*/${RUN_ID}/assembled" 2>/dev/null | head -n1)
-    if [[ -z "${CANDIDATE_DIR}" || ! -d "${CANDIDATE_DIR}" ]]; then
+    CANDIDATE_DIR=""
+    for SEARCH_ROOT in "${SCRATCH}/gsq/checkpoints" "${REPO_ROOT}/runtime/gsq/checkpoints"; do
+        [[ -d "${SEARCH_ROOT}" ]] || continue
+        FOUND=$(find "${SEARCH_ROOT}" -type d -path "*/${RUN_ID}/assembled" -print -quit 2>/dev/null)
+        if [[ -n "${FOUND}" && -d "${FOUND}" ]]; then
+            CANDIDATE_DIR="${FOUND}"
+            break
+        fi
+    done
+    if [[ -z "${CANDIDATE_DIR}" ]]; then
         echo "ERROR: no assembled model found for RUN_ID=${RUN_ID}" >&2
+        echo "       searched: ${SCRATCH}/gsq/checkpoints, ${REPO_ROOT}/runtime/gsq/checkpoints" >&2
         exit 1
     fi
     MODEL_PATH="${CANDIDATE_DIR}"
@@ -56,10 +69,21 @@ if [[ ! -d "${MODEL_PATH}" ]]; then
 fi
 [[ -z "${EVAL_OUTPUT_DIR}" ]] && EVAL_OUTPUT_DIR="${MODEL_PATH}/evals"
 
-# Resolve WANDB_RUN_ID (so eval can resume the same WandB run).
+# Resolve WANDB_RUN_ID (so eval can resume the same WandB run). Same dual-root,
+# pipefail-safe lookup as MODEL_PATH above. ${SCRATCH} may legitimately point
+# outside the repo (user-controlled), in which case the find on a non-existent
+# path would exit non-zero and trip pipefail+set -e, silently killing the script.
 if [[ -z "${WANDB_RUN_ID:-}" && -n "${RUN_ID}" ]]; then
-    PROGRESS_JSON=$(find "${SCRATCH}/gsq/checkpoints" -path "*/${RUN_ID}/progress.json" 2>/dev/null | head -n1)
-    if [[ -f "${PROGRESS_JSON}" ]]; then
+    PROGRESS_JSON=""
+    for SEARCH_ROOT in "${SCRATCH}/gsq/checkpoints" "${REPO_ROOT}/runtime/gsq/checkpoints"; do
+        [[ -d "${SEARCH_ROOT}" ]] || continue
+        FOUND=$(find "${SEARCH_ROOT}" -path "*/${RUN_ID}/progress.json" -print -quit 2>/dev/null)
+        if [[ -n "${FOUND}" && -f "${FOUND}" ]]; then
+            PROGRESS_JSON="${FOUND}"
+            break
+        fi
+    done
+    if [[ -n "${PROGRESS_JSON}" ]]; then
         WANDB_RUN_ID=$(python -c "import json; print(json.load(open('${PROGRESS_JSON}')).get('wandb_run_id',''))" 2>/dev/null || true)
         export WANDB_RUN_ID
     fi
@@ -95,8 +119,17 @@ export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${SCRATCH}/.inductor_
 export TMPDIR="${TMPDIR:-${SCRATCH}/.tmp}"
 mkdir -p "${TRITON_CACHE_DIR}" "${TRITON_HOME}" "${TORCHINDUCTOR_CACHE_DIR}" "${TMPDIR}"
 
+# Persist vLLM stdout/stderr next to the model so failures are debuggable
+# even when the terminal scrollback rolls (vLLM startup logs are huge).
+SERVE_LOG="${SERVE_LOG:-${MODEL_PATH}/serve_vllm.log}"
+mkdir -p "$(dirname "${SERVE_LOG}")"
+echo "vLLM log   : ${SERVE_LOG}"
+
 # Launch the vLLM server in the background so we can optionally run eval.
-python "${REPO_ROOT}/serve_vllm.py" --num-nodes 1 --port "${PORT}" "${VLLM_ARGS[@]}" &
+# Use stdbuf to keep output line-buffered into the log, and `tee` so the
+# user still sees it on the terminal in real time.
+( python "${REPO_ROOT}/serve_vllm.py" --num-nodes 1 --port "${PORT}" "${VLLM_ARGS[@]}" 2>&1 \
+    | tee "${SERVE_LOG}" ) &
 SERVER_PID=$!
 
 cleanup() {
@@ -118,6 +151,14 @@ if [[ "${EVAL}" = "1" ]]; then
             HEALTHY=1
             break
         fi
+        # Bail out early if the server background process has already died
+        # (otherwise we'd loop curl-poll for a full hour for no reason).
+        if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+            echo "ERROR: vLLM server pid ${SERVER_PID} exited before becoming healthy." >&2
+            echo "       See ${SERVE_LOG} for details (last 40 lines):" >&2
+            tail -n 40 "${SERVE_LOG}" >&2 || true
+            exit 1
+        fi
         sleep 20
     done
     if [[ "${HEALTHY}" = "0" ]]; then
@@ -136,6 +177,7 @@ if [[ "${EVAL}" = "1" ]]; then
         [[ -n "${EVAL_OUTPUT_DIR}" ]] && EVAL_ARGS+=(--output-dir "${EVAL_OUTPUT_DIR}")
         [[ -n "${WANDB_RUN_ID:-}" ]] && EVAL_ARGS+=(--wandb-run-id "${WANDB_RUN_ID}")
         [[ -n "${EVAL_WANDB_FLAG}" ]] && EVAL_ARGS+=("${EVAL_WANDB_FLAG}")
+        [[ -n "${EVAL_LIMIT}" ]] && EVAL_ARGS+=(--limit "${EVAL_LIMIT}")
 
         echo "Running lm-eval: tasks=${EVAL_TASKS}"
         python "${REPO_ROOT}/eval_model.py" "${EVAL_ARGS[@]}"

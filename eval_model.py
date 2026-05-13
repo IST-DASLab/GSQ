@@ -181,6 +181,8 @@ def main():
                         help="WandB run ID to resume (overrides progress.json lookup)")
     parser.add_argument("--no-wandb", action="store_true",
                         help="Skip WandB logging")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="If set, pass --limit to lm-eval (max examples per task)")
     args = parser.parse_args()
 
     if args.model_path:
@@ -224,6 +226,8 @@ def main():
         "--log_samples",
         "--trust_remote_code",
     ]
+    if args.limit is not None:
+        cmd.extend(["--limit", str(args.limit)])
 
     print(f"\nRunning: {' '.join(cmd)}\n")
     result = subprocess.run(cmd)

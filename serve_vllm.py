@@ -82,8 +82,13 @@ def main():
     if not vllm_args:
         parser.error("vllm serve arguments required (e.g. /path/to/model --tensor-parallel-size 4)")
 
-    if not wait_for_ray(args.num_nodes, timeout_sec=args.ray_wait_timeout):
-        sys.exit(1)
+    # Single-node serves don't need (and shouldn't require) a Ray cluster.
+    # Ray is only relevant when --num-nodes > 1; otherwise vllm serve runs locally.
+    if args.num_nodes > 1:
+        if not wait_for_ray(args.num_nodes, timeout_sec=args.ray_wait_timeout):
+            sys.exit(1)
+    else:
+        print(f"Single-node mode (--num-nodes={args.num_nodes}); skipping Ray cluster wait.")
 
     cmd = ["vllm", "serve"] + vllm_args
     proc = subprocess.Popen(cmd)

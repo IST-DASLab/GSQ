@@ -8,7 +8,7 @@ from lion_pytorch import Lion
 import torch.nn.functional as F
 import torch.distributed as dist
 from src.quantization import *
-from src.utils.progress_reporter import report_gumbel_epoch, report_gumbel_step
+from src.utils.progress_reporter import report_gumbel_epoch, report_gumbel_step, report_pipeline
 
 class QuantizationTrainer:
     def __init__(self, model, config, dtype, self_attn=False):
@@ -210,7 +210,15 @@ class QuantizationTrainer:
             torch.cuda.empty_cache()
 
         if self.use_dist:
+            if logging is not None and self.global_rank == 0:
+                report_pipeline(f"Syncing ranks before writing checkpoints ({layer_name})")
             dist.barrier()
+
+        if logging is not None and self.global_rank == 0:
+            if self.train_attn:
+                report_pipeline(f"Applying quantized attention weights in-place ({layer_name})")
+            else:
+                report_pipeline(f"Writing quantized shard(s) to disk ({layer_name})")
 
         for tensor_name, quantizer in self.quantizers.items():
             if self.train_attn:
@@ -226,7 +234,12 @@ class QuantizationTrainer:
                     if self.model.is_moe or self.global_rank == 0:
                         self.model.save_to_disc(base, pairs)
 
+        if logging is not None and self.global_rank == 0:
+            report_pipeline(f"Finished writing layer checkpoint ({layer_name})")
+
         if self.use_dist:
+            if logging is not None and self.global_rank == 0:
+                report_pipeline("Shard writes done; syncing ranks before next phase")
             dist.barrier()
         self.quantizers.clear()
 

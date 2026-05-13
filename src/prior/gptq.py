@@ -211,7 +211,6 @@ class GPTQ:
                             self.quantizer.scale,
                             self.quantizer.zero,
                             self.quantizer.maxq,
-                            self.quantizer.format
                         ).flatten()
 
                     Q1[:, i] = q

@@ -1,3 +1,4 @@
+import os
 import time
 import torch
 import torch.nn as nn
@@ -14,9 +15,8 @@ from safetensors.torch import load_file as safe_load_file
 from safetensors.torch import save_file as safe_save_file
 from compressed_tensors import PackedQuantizationCompressor
 from contextlib import ExitStack
-from src.prior.sparsegpt import *
-from src.prior.gptq import *
-from src.evaluation.wiki_eval import *
+from src.prior.quant import Quantizer
+from src.prior.gptq import GPTQ, rtn_quantize
 from src.utils.progress_reporter import report_gptq_calib, report_gptq_linear
 
 class BaseModelWrapper(ABC):
@@ -475,29 +475,27 @@ class BaseModelWrapper(ABC):
                 raise ValueError(f"Unknown dtype string: {x}")
         raise TypeError(f"Expected torch.dtype or str, got {type(x)}")
     
+    def _compress_weight(self, weight, scale):
+        # Adapter for the post-0.15 compressed_tensors API: PackedQuantizationCompressor
+        # is now state-dict / scheme based (compress(state_dict, scheme)) instead of
+        # the old per-tensor compress_weight(weight=, scale=, quantization_args=).
+        self.quantization_config.config_groups.group_0.weights.group_size = self.groupsize
+        scheme = self.quantization_config.config_groups.group_0
+        return self.compressor.compress(
+            {"weight": weight, "weight_scale": scale},
+            scheme,
+        )
+
     def save_to_disc(self, pfx, pairs):
         os.makedirs(self.save_dir, exist_ok=True)
         to_save = {}
         for name, pair in pairs.items():
-            self.quantization_config.config_groups.group_0.weights.group_size = self.groupsize
-            if isinstance(pair[1], tuple):
-                compressed = self.compressor.compress_weight(
-                    weight=pair[0].detach().cpu(),
-                    scale=pair[1][0].detach().cpu(),
-                    quantization_args=self.quantization_config.config_groups.group_0.weights
-                )
-            else:
-                compressed = self.compressor.compress_weight(
-                    weight=pair[0].detach().cpu(),
-                    scale=pair[1].detach().cpu(),
-                    quantization_args=self.quantization_config.config_groups.group_0.weights
-                )
+            scale = pair[1][0] if isinstance(pair[1], tuple) else pair[1]
+            scale_cpu = scale.detach().cpu()
+            compressed = self._compress_weight(pair[0].detach().cpu(), scale_cpu)
             base = f"{pfx}.{name}"
             to_save[base + ".weight_packed"] = compressed["weight_packed"]
-            if isinstance(pair[1], tuple):
-                to_save[base + ".weight_scale"]  = pair[1][0].detach().cpu()
-            else:
-                to_save[base + ".weight_scale"]  = pair[1].detach().cpu()
+            to_save[base + ".weight_scale"]  = scale_cpu
             to_save[base + ".weight_shape"]  = compressed["weight_shape"]
         safe = pfx.replace('.', '_')
         path = os.path.join(self.save_dir, f"{safe}.safetensors")
@@ -507,19 +505,18 @@ class BaseModelWrapper(ABC):
         os.makedirs(self.save_dir, exist_ok=True)
         to_save = {}
         self_attn_layers = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
-        self.quantization_config.config_groups.group_0.weights.group_size = self.groupsize
         for name in self_attn_layers:
             base = f"{pfx}.{name}"
             module = self.model.get_submodule(base)
             if isinstance(self.temp_weights[f"{base}.scale"], tuple):
                 self.temp_weights[f"{base}.scale"] = self.temp_weights[f"{base}.scale"][0]
-            compressed = self.compressor.compress_weight(
-                weight=module.weight.data.detach().cpu(),
-                scale=self.temp_weights[f"{base}.scale"].detach().cpu(),
-                quantization_args=self.quantization_config.config_groups.group_0.weights
+            scale_cpu = self.temp_weights[f"{base}.scale"].detach().cpu()
+            compressed = self._compress_weight(
+                module.weight.data.detach().cpu(),
+                scale_cpu,
             )
             to_save[base + ".weight_packed"] = compressed["weight_packed"]
-            to_save[base + ".weight_scale"]  = self.temp_weights[f"{base}.scale"].detach().cpu()
+            to_save[base + ".weight_scale"]  = scale_cpu
             to_save[base + ".weight_shape"]  = compressed["weight_shape"]
         safe = pfx.replace('.', '_')
         path = os.path.join(self.save_dir, f"{safe}.safetensors")
@@ -571,7 +568,11 @@ class BaseModelWrapper(ABC):
                         "weight_scale": tensors[f"{base}.weight_scale"],
                         "weight_shape": tensors[f"{base}.weight_shape"]
                     }
-                    W_deq = self.compressor.decompress_weight(compressed_data, self.quantization_config.config_groups.group_0.weights)
+                    decompressed = self.compressor.decompress(
+                        compressed_data,
+                        self.quantization_config.config_groups.group_0,
+                    )
+                    W_deq = decompressed["weight"]
 
                     set_module_tensor_to_device(self.model, f"{base}.weight".replace(".language_model", ""), self.device, value=W_deq, dtype=self.dtype)
                     continue

@@ -145,6 +145,12 @@ def report_ppl_layer(i, num_layers, elapsed=None):
     print(msg, flush=True)
 
 
+def report_pipeline(message):
+    if not _ENABLED:
+        return
+    print(f"  [Pipeline] {message}", flush=True)
+
+
 def report_expert_gptq(expert_idx, total_experts, expert_id, elapsed=None):
     if not _ENABLED:
         return

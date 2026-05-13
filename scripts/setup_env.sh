@@ -11,8 +11,9 @@
 #   SKIP_FLASH_ATTN=1 bash scripts/setup_env.sh     # skip flash-attn build
 #   PYTHON_VERSION=3.11 bash scripts/setup_env.sh   # pin Python version
 #   VENV_PATH=/data/venvs/gsq bash scripts/setup_env.sh
-#   TORCH_CUDA=cu124 bash scripts/setup_env.sh      # override torch wheel index
-#                                                   #   (default: cu128 from pyproject.toml)
+#   TORCH_CUDA=cu128 bash scripts/setup_env.sh      # override torch wheel index
+#                                                   #   (default: cu130 from pyproject.toml,
+#                                                   #    matches vLLM 0.20+ which ships CUDA-13 ABI)
 #
 # Requires uv. Install with:
 #   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -41,7 +42,7 @@ echo "Repo root  : ${REPO_ROOT}"
 echo "Venv path  : ${VENV_PATH}"
 echo "Python     : ${PYTHON_VERSION}"
 echo "uv         : $(uv --version)"
-echo "torch idx  : ${UV_INDEX_PYTORCH:-<from pyproject.toml: cu128>}"
+echo "torch idx  : ${UV_INDEX_PYTORCH:-<from pyproject.toml: cu130>}"
 echo "flash-attn : $([ "${SKIP_FLASH_ATTN}" = "1" ] && echo SKIP || echo INSTALL)"
 echo "=========================================="
 

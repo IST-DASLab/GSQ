@@ -24,9 +24,11 @@ dependencies = [
     "tiktoken",
     "lm-eval[api]",
     "lighteval",
-    "torch",
-    "torchvision",
-    "vllm",
+    # vLLM 0.20.2 metadata pins torch==2.11.0 and torchvision==0.26.0 exactly;
+    # mirror those constraints here so uv doesn't backtrack vllm to 0.1.2.
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "vllm==0.20.2",
     "ray",
     "ninja"
 ]
@@ -36,13 +38,16 @@ where = ["."]
 include = ["src*"]
 
 # ── Pin torch (and friends) to the PyTorch CUDA wheel index ────────────────
-# Default is cu128. To target a different CUDA version, override the index URL
-# at the command line, e.g.:
-#   UV_INDEX_PYTORCH=https://download.pytorch.org/whl/cu124 uv sync
+# Default is cu130 to match vLLM 0.20+ which ships a CUDA-13 ABI (its _C.abi3.so
+# requires libcudart.so.13). To target a different CUDA version, override the
+# index URL at the command line, e.g.:
+#   UV_INDEX_PYTORCH=https://download.pytorch.org/whl/cu128 uv sync
 # or pass --index-strategy unsafe-best-match with --index pytorch=<url>.
+# When changing this, also bump TORCH_CUDA in scripts/setup_env.sh and re-pin
+# vLLM accordingly: cu128 needs vllm<0.20; cu130 works with vllm>=0.20.
 [[tool.uv.index]]
 name = "pytorch"
-url = "https://download.pytorch.org/whl/cu128"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]

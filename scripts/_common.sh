@@ -5,6 +5,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="${SCRATCH:-${REPO_ROOT}/runtime}"
 VENV_PATH="${VENV_PATH:-${REPO_ROOT}/.venv}"
 
+
+export HF_HOME=/nfs/scistore19/alistgrp/huggingface
+export HF_DATASETS_CACHE=/mnt/beegfs/alistgrp/stabesh/.cache/huggingface/datasets
+
+
 if [[ -d "${VENV_PATH}" ]]; then
     # shellcheck disable=SC1091
     source "${VENV_PATH}/bin/activate"
@@ -25,6 +30,9 @@ ulimit -c 0
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+# If a multi-GPU run hangs at the very end in destroy_process_group(), main.py bounds that
+# call with GSQ_DIST_DESTROY_TIMEOUT_SEC (default 120 in code). Use 0 to wait indefinitely,
+# or GSQ_SKIP_DIST_DESTROY=1 to skip destroy() entirely (exit may be noisier but returns).
 
 mkdir -p "${REPO_ROOT}/logs"
 

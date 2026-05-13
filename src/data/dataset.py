@@ -1,4 +1,5 @@
 import os
+import glob
 import torch
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -73,18 +74,52 @@ def tokenize_texts(data, tokenizer, max_length, num_samples, seed=0):
     print("number of samples:", len(tokenized_batches))
     return tokenized_batches
 
+
+def _load_c4_from_arrow_cache():
+    """Offline fallback when `load_dataset(allenai/c4)` fingerprints do not match HF_DATASETS_CACHE."""
+    from datasets import Dataset, concatenate_datasets
+
+    cache_root = os.environ.get(
+        "HF_DATASETS_CACHE",
+        os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "datasets"),
+    )
+    base = os.path.join(cache_root, "allenai___c4")
+    if not os.path.isdir(base):
+        return None, None
+    train_pattern = os.path.join(base, "default-*", "0.0.0", "*", "c4-train-*.arrow")
+    val_pattern = os.path.join(base, "default-*", "0.0.0", "*", "c4-validation*.arrow")
+    train_arrows = sorted(glob.glob(train_pattern))
+    val_arrows = sorted(glob.glob(val_pattern))
+    if not train_arrows or not val_arrows:
+        return None, None
+    train_data = concatenate_datasets([Dataset.from_file(p) for p in train_arrows])
+    val_data = concatenate_datasets([Dataset.from_file(p) for p in val_arrows])
+    return train_data, val_data
+
+
 def c4(tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_workers, max_length,
        shuffle_seed=1234, **_kw):
-    train_data = load_dataset(
-        'allenai/c4',
-        data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, 
-        split='train'
-    )
-    val_data = load_dataset(
-        'allenai/c4',
-        data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, 
-        split='validation'
-    )
+    try:
+        train_data = load_dataset(
+            'allenai/c4',
+            data_files={'train': 'en/c4-train.00000-of-01024.json.gz'},
+            split='train'
+        )
+        val_data = load_dataset(
+            'allenai/c4',
+            data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'},
+            split='validation'
+        )
+    except ValueError as e:
+        err = str(e)
+        if "Couldn't find cache" not in err:
+            raise
+        train_data, val_data = _load_c4_from_arrow_cache()
+        if train_data is None:
+            raise RuntimeError(
+                f"C4 dataset cache mismatch ({err}). Point HF_DATASETS_CACHE at a dir containing "
+                f"allenai___c4/*/c4-train-*.arrow and c4-validation*.arrow, or refresh the dataset online."
+            ) from e
 
     train_tokens = tokenize_texts(train_data, tokenizer, max_length, train_samples + gpt_samples, seed=shuffle_seed)
     val_tokens = tokenize_texts(val_data, tokenizer, max_length, val_samples)
@@ -94,6 +129,7 @@ def c4(tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_worke
     gpt_loader = DataLoader(train_tokens[train_samples:], batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     return train_loader, val_loader, gpt_loader
+
 
 def fineweb_edu(tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_workers, max_length,
                 shuffle_seed=1234, shuffle_buffer_size=100_000, seed=42, **_kw):
@@ -149,12 +185,13 @@ def open_thoughts(tokenizer, batch_size, train_samples, val_samples, gpt_samples
     rank, world_size = _get_dist_info()
 
     tmpl = tokenizer.chat_template
-    tmpl = tmpl.replace(
-        "<think></think>{{render_content(message)}}",
-        "{%- set rc = message.get('reasoning_content', '') -%}"
-        "<think>{{rc}}</think>{{render_content(message)}}"
-    )
-    tokenizer.chat_template = tmpl
+    if tmpl is not None:
+        tmpl = tmpl.replace(
+            "<think></think>{{render_content(message)}}",
+            "{%- set rc = message.get('reasoning_content', '') -%}"
+            "<think>{{rc}}</think>{{render_content(message)}}"
+        )
+        tokenizer.chat_template = tmpl
 
     total_needed = train_samples + val_samples + gpt_samples
 
@@ -222,12 +259,13 @@ def mixed(tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_wo
         ds = ds.shuffle(seed=seed).select(range(open_thoughts_max_samples))
 
         tmpl = tokenizer.chat_template
-        tmpl = tmpl.replace(
-            "<think></think>{{render_content(message)}}",
-            "{%- set rc = message.get('reasoning_content', '') -%}"
-            "<think>{{rc}}</think>{{render_content(message)}}"
-        )
-        tokenizer.chat_template = tmpl
+        if tmpl is not None:
+            tmpl = tmpl.replace(
+                "<think></think>{{render_content(message)}}",
+                "{%- set rc = message.get('reasoning_content', '') -%}"
+                "<think>{{rc}}</think>{{render_content(message)}}"
+            )
+            tokenizer.chat_template = tmpl
 
         def preprocess(example):
             messages = []

@@ -1,4 +1,4 @@
-import os, gc, json
+import os, sys, gc, json
 import argparse
 import yaml
 from datetime import timedelta
@@ -16,8 +16,9 @@ from src.trainer import QuantizationTrainer
 from src.utils.logging_utils import QuantizationLogger
 from src.utils import progress_reporter
 from src.utils.progress_reporter import (
-    report_layer, report_gptq_done, report_throughput,
+    report_layer, report_gptq_done, report_throughput, report_pipeline,
 )
+import threading
 import time
 import uuid
 import torch.distributed as dist
@@ -26,6 +27,47 @@ import torch.distributed as dist
 GLOBAL_RANK = 0
 
 PROGRESS_FILENAME = "progress.json"
+
+
+def _distributed_destroy_pg():
+    if not dist.is_initialized():
+        return
+    skip = os.environ.get("GSQ_SKIP_DIST_DESTROY", "").strip().lower() in ("1", "true", "yes")
+    if skip:
+        if GLOBAL_RANK == 0:
+            report_pipeline(
+                "Skipping destroy_process_group() (GSQ_SKIP_DIST_DESTROY); "
+                "launcher may briefly wait on child processes."
+            )
+        return
+    raw = os.environ.get("GSQ_DIST_DESTROY_TIMEOUT_SEC", "120")
+
+    try:
+        timeout_sec = float(raw)
+    except ValueError:
+        timeout_sec = 120.0
+
+    def attempt_destroy():
+        try:
+            dist.destroy_process_group()
+        except Exception:
+            pass
+
+    if timeout_sec <= 0:
+        attempt_destroy()
+        return
+
+    thread = threading.Thread(target=attempt_destroy, name="destroy_process_group")
+    thread.start()
+    thread.join(timeout_sec)
+    if thread.is_alive():
+        if GLOBAL_RANK == 0:
+            report_pipeline(
+                f"destroy_process_group blocked ≥{timeout_sec:.0f}s — forcing exit "
+                "(NCCL/Python known issue); use GSQ_DIST_DESTROY_TIMEOUT_SEC=0 to wait "
+                "forever, or GSQ_SKIP_DIST_DESTROY=1 to omit destroy."
+            )
+        os._exit(0)
 
 
 def parse_args():
@@ -284,6 +326,8 @@ def train_all_layers(model, train_loader, val_loader, gpt_loader, logger, config
                 torch.cuda.empty_cache()
 
                 if dist.is_initialized():
+                    if GLOBAL_RANK == 0:
+                        report_pipeline("Syncing ranks after trainer teardown (checkpoint phase)")
                     dist.barrier()
                 layer_time = time.time() - layer_start
                 layer_times.append(layer_time)
@@ -321,19 +365,31 @@ def train_all_layers(model, train_loader, val_loader, gpt_loader, logger, config
                     wandb.log(layer_logs)
                     torch.cuda.reset_peak_memory_stats()
 
-                if (count - 1) % config.training.ppl_eval_every_n_layers == 0:
+                _ppl_every = config.training.ppl_eval_every_n_layers
+                if _ppl_every > 0 and (count - 1) % _ppl_every == 0:
+                    if GLOBAL_RANK == 0:
+                        report_pipeline(
+                            "Running perplexity evaluation (full model forward; sparse console output)"
+                        )
+                    _ppl_t0 = time.time()
                     dataset_ppl = model.ppl_evaluation(count - 1)
                     if GLOBAL_RANK == 0:
                         logger.logger.info(f"eval/ppl (layer {layer_idx}): {dataset_ppl:.4f}")
+                        report_pipeline(f"PPL evaluation done in {time.time() - _ppl_t0:.1f}s")
                     if config.wandb.enabled and GLOBAL_RANK == 0:
                         wandb.log({"eval/ppl": dataset_ppl, "layer/index": layer_idx})
 
                 if GLOBAL_RANK == 0:
-                    logger.logger.info(f"Loading quantized weights for layer: {current_layer}")
+                    report_pipeline(f"Reloading quantized weights from disk for {current_layer}")
+                _load_t0 = time.time()
                 model.load_from_disc(current_layer)
+                if GLOBAL_RANK == 0:
+                    logger.logger.info(
+                        f"Loaded quantized weights for {current_layer} in {time.time() - _load_t0:.1f}s"
+                    )
 
                 if GLOBAL_RANK == 0:
-                    logger.logger.info("Propagating activations through layer")
+                    report_pipeline("Propagating train/val activations through quantized layer")
                 if model.is_moe:
                     if gsq_enabled:
                         model.get_mlp_output_all(train_all)
@@ -346,6 +402,7 @@ def train_all_layers(model, train_loader, val_loader, gpt_loader, logger, config
                     model.get_layer_activations(val_all)
 
                 if GLOBAL_RANK == 0:
+                    report_pipeline("Writing progress.json (resume state)")
                     save_progress(config.training.checkpoint_dir, layer_idx,
                                   run_id=run_id, wandb_run_id=wandb_run_id)
 
@@ -364,8 +421,12 @@ def train_all_layers(model, train_loader, val_loader, gpt_loader, logger, config
             else:
                 model.get_layer_activations(train_all)
                 model.get_layer_activations(val_all)
+            if GLOBAL_RANK == 0:
+                report_pipeline("Refreshing GPTQ calibration activation buffer through layer")
             model.get_layer_activations(gpt_all)
 
+            if GLOBAL_RANK == 0:
+                report_pipeline(f"Offloading layer to meta ({current_layer})")
             model.offload_to_meta(current_layer)
 
             if max_layers is not None and count >= max_layers:
@@ -522,7 +583,7 @@ def main():
             f"str={config.quantization.strength}_"
             f"ncal={config.data.num_samples}_"
             f"bsz={config.data.batch_size}_"
-            f"lr={config.training.masks_lr}"
+            f"lr={config.training.lr1}"
         )
         wandb_kwargs = dict(
             project=config.wandb.project,
@@ -591,16 +652,60 @@ def main():
     except KeyboardInterrupt:
         if GLOBAL_RANK == 0:
             logger.logger.info("Training interrupted.")
-        if dist.is_initialized():
-            dist.destroy_process_group()
-    
+
     finally:
+        try:
+            del train_loader
+            del val_loader
+            del gpt_loader
+        except NameError:
+            pass
+        gc.collect()
+
         if GLOBAL_RANK == 0:
             logger.logger.info("Training finished.")
-            if config.wandb.enabled:
+            report_pipeline("Teardown: closing session (no post-training barriers)")
+
+        # NOTE: We deliberately skip post-training `dist.barrier()` calls.
+        # NCCL barriers at end-of-training reliably hang in C++ (uninterruptible
+        # by Python), which then traps the elastic agent in `proc.wait()` even
+        # though `_distributed_destroy_pg()` has a per-rank timeout. Every rank
+        # is about to exit anyway, so synchronization here serves no purpose.
+
+        if GLOBAL_RANK == 0 and config.wandb.enabled:
+            try:
                 wandb.finish()
-        if dist.is_initialized():
-            dist.destroy_process_group()
+            except Exception:
+                pass
+
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+        if GLOBAL_RANK == 0 and dist.is_initialized():
+            tout = os.environ.get("GSQ_DIST_DESTROY_TIMEOUT_SEC", "120")
+            report_pipeline(
+                f"NCCL teardown: destroy_process_group() (join timeout {tout}s; 0=infinite)"
+            )
+
+        _distributed_destroy_pg()
+
+        if GLOBAL_RANK == 0:
+            report_pipeline("Cleanup complete.")
+
+        # Hard-exit every rank. Returning from main() lets the Python interpreter
+        # try to join non-daemon threads (e.g. the destroy_process_group worker
+        # thread when it timed out) and run NCCL/CUDA atexit hooks, both of
+        # which can deadlock. We've already flushed WandB and freed CUDA caches.
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)
 
 if __name__ == "__main__":
     main()
