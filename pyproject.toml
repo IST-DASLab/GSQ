@@ -25,8 +25,10 @@ dependencies = [
     "lm-eval[api]",
     "lighteval",
     "torch",
+    "torchvision",
     "vllm",
     "ray",
+    "ninja"
 ]
 
 [tool.setuptools.packages.find]
