@@ -3,7 +3,7 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2604.18556-b31b1b.svg)](https://arxiv.org/abs/2604.18556)
 
 **Paper:** *GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling* (preprint)
-**Authors:** Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Dan Alistarh — ISTA / ETH Zürich / Red Hat AI
+**Authors:** Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, Dan Alistarh — ISTA / ETH Zürich / TU Wien / Red Hat AI
 
 ---
 
