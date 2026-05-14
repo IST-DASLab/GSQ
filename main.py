@@ -502,6 +502,9 @@ def get_model_wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype, 
     elif 'kimi' in name_lower:
         from src.models.kimi_k2 import KimiK2Wrapper
         return KimiK2Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
+    elif 'gemma-4-31b' in name_lower:
+        from src.models.gemma4 import Gemma4Wrapper
+        return Gemma4Wrapper(model_name, tokenizer, batch_size, seqlen, device, dtype)
     else:
         raise ValueError(f"Unsupported model family: {model_name}")
 
