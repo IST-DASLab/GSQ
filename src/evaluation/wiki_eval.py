@@ -196,12 +196,6 @@ def open_thoughts_test_dataset(tokenizer, ppl_seed=1234, ppl_max_samples=1000):
 
     def preprocess(example):
         messages = []
-        messages.append({
-            "role": "system",
-            "content": (
-                "You are Kimi, an AI assistant created by Moonshot AI."
-            ),
-        })
         for msg in example["conversations"]:
             role = msg["from"]
             if role == "user":
