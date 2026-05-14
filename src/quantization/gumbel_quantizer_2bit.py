@@ -54,7 +54,7 @@ class GumbelSoftmaxFunction(torch.autograd.Function):
 
         ctx.cuda_fwd_rng_state = torch.cuda.get_rng_state(device=device)
 
-        eps = 1e-10
+        eps = 1e-8
 
         u = torch.rand_like(quant_logits)
         noise = -torch.log(-torch.log(u + eps) + eps).to(values.dtype)
@@ -77,7 +77,7 @@ class GumbelSoftmaxFunction(torch.autograd.Function):
 
         with torch.random.fork_rng(devices=[device]):
             torch.cuda.set_rng_state(ctx.cuda_fwd_rng_state, device=device)
-            eps = 1e-10
+            eps = 1e-8
             u = torch.rand_like(quant_logits)
             noise = -torch.log(-torch.log(u + eps) + eps).to(values.dtype)
             soft_quant = F.softmax((quant_logits.to(values.dtype) * scale + noise) / temperature, dim=0)
