@@ -78,6 +78,10 @@ class QuantizationTrainer:
                     layer_idx=None, num_layers=None):
         if logging is not None:
             logging = logging.logger
+        if not self.quantizers:
+            if self.global_rank == 0:
+                logging.info(f"Skipping GSQ training for layer {layer_name} since no quantizers were set up.")
+            return
         num_epochs = self.config.training.num_epochs
         num_samples = train_all['input'].shape[0]
         batch_size = self.config.data.batch_size // self.world_size
