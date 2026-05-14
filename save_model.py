@@ -162,7 +162,7 @@ def _build_ignore_list(model_config):
     return ignore
 
 
-def inject_quantization_config(out_dir, groupsize, wbits=4):
+def inject_quantization_config(out_dir, groupsize, wbits=4, num_layers=None, quantized_layer_indices=None):
     """Add compressed-tensors quantization_config to config.json.
 
     This enables vLLM and HuggingFace transformers to auto-detect the
@@ -173,6 +173,12 @@ def inject_quantization_config(out_dir, groupsize, wbits=4):
         config = json.load(f)
 
     ignore = _build_ignore_list(config)
+
+    if num_layers is not None and quantized_layer_indices is not None:
+        unquantized = sorted(set(range(num_layers)) - set(quantized_layer_indices))
+        if unquantized:
+            idx_alt = "|".join(str(i) for i in unquantized)
+            ignore.append(f"re:.*layers\\.({idx_alt})\\..*")
 
     config["quantization_config"] = {
         "config_groups": {
@@ -271,6 +277,22 @@ def main():
     overridden = set(base_entries.keys()) & set(quantized_entries.keys())
     print(f"  Overriding {len(overridden)} base tensors with quantized versions")
 
+    quantized_module_prefixes = set()
+    for k in quantized_entries.keys():
+        for suffix in (".weight_packed", ".weight_scale", ".weight_shape",
+                       ".weight_zero_point", ".weight_g_idx"):
+            if k.endswith(suffix):
+                quantized_module_prefixes.add(k[: -len(suffix)])
+                break
+    dropped = 0
+    for prefix in quantized_module_prefixes:
+        bk = f"{prefix}.weight"
+        if bk in base_entries and bk not in quantized_entries:
+            del base_entries[bk]
+            dropped += 1
+    if dropped:
+        print(f"  Dropping {dropped} base float weights replaced by packed-quantized versions")
+
     merged = {**base_entries, **quantized_entries}
     all_entries = list(merged.values())
 
@@ -336,8 +358,19 @@ def main():
         print(f"  {fname}")
 
     groupsize = cfg.quantization.groupsize
+    quantized_layer_indices = sorted({
+        e["layer_idx"] for e in quantized_entries.values() if e["layer_idx"] is not None
+    })
     print(f"\nInjecting quantization_config into config.json (group_size={groupsize})...")
-    inject_quantization_config(out_dir, groupsize)
+    if quantized_layer_indices and len(quantized_layer_indices) < num_layers:
+        missing = sorted(set(range(num_layers)) - set(quantized_layer_indices))
+        print(f"  Partial run detected: {len(quantized_layer_indices)}/{num_layers} layers quantized; "
+              f"adding {len(missing)} unquantized layers to ignore list")
+    inject_quantization_config(
+        out_dir, groupsize,
+        num_layers=num_layers,
+        quantized_layer_indices=quantized_layer_indices,
+    )
 
     print(f"\nDone. Total model size: ~{total_size / (1024**3):.2f} GB")
     print(f"Output: {out_dir}")

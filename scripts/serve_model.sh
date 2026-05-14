@@ -145,8 +145,15 @@ if [[ "${EVAL}" = "1" ]]; then
     HEALTH_URL="http://127.0.0.1:${PORT}/health"
     echo "EVAL=1 — waiting for ${HEALTH_URL}..."
     HEALTHY=0
+    if command -v curl >/dev/null 2>&1; then
+        _HEALTH_CMD=(curl -sf "${HEALTH_URL}")
+    elif command -v wget >/dev/null 2>&1; then
+        _HEALTH_CMD=(wget -qO- "${HEALTH_URL}")
+    else
+        _HEALTH_CMD=(python -c "import sys, urllib.request as u; sys.exit(0 if u.urlopen('${HEALTH_URL}', timeout=5).status==200 else 1)")
+    fi
     for i in $(seq 1 180); do
-        if curl -sf "${HEALTH_URL}" >/dev/null 2>&1; then
+        if "${_HEALTH_CMD[@]}" >/dev/null 2>&1; then
             echo "  Server healthy after ${i}*20s"
             HEALTHY=1
             break
