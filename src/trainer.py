@@ -8,7 +8,40 @@ from lion_pytorch import Lion
 import torch.nn.functional as F
 import torch.distributed as dist
 from src.quantization import *
-from src.utils.progress_reporter import report_gumbel_epoch, report_gumbel_step, report_pipeline
+from src.utils.progress_reporter import report_gumbel_epoch, report_gumbel_step
+
+class CUDAPrefetcher:
+    def __init__(self, iterable, device, dtype):
+        self.iterable = iter(iterable)
+        self.device = device
+        self.dtype = dtype
+        self.stream = torch.cuda.Stream(device=device)
+        self.next_batch = None
+        self.preload()
+
+    def preload(self):
+        try:
+            batch = next(self.iterable)
+        except StopIteration:
+            self.next_batch = None
+            return
+
+        with torch.cuda.stream(self.stream):
+            self.next_batch = batch.to(
+                device=self.device,
+                dtype=self.dtype,
+                non_blocking=True,
+            )
+
+    def next(self):
+        torch.cuda.current_stream(self.device).wait_stream(self.stream)
+
+        batch = self.next_batch
+        if batch is None:
+            return None
+
+        self.preload()
+        return batch
 
 class QuantizationTrainer:
     def __init__(self, model, config, dtype, self_attn=False):
@@ -30,6 +63,13 @@ class QuantizationTrainer:
         if hasattr(self.model, 'save_dir'):
             self.model.save_dir = config.training.checkpoint_dir
         self.train_attn = self_attn
+
+    def _pin_input_if_needed(self, data_dict):
+        x = data_dict["input"]
+        if x.device.type == "cpu" and not x.is_pinned():
+            data_dict["input"] = x.pin_memory()
+
+        return data_dict
         
     def _create_quantizer(self, Q, scales):
         gsq_bits = getattr(self.config.quantization, 'gsq_bits', 2)
@@ -76,27 +116,39 @@ class QuantizationTrainer:
         
     def train_layer(self, layer_name, train_all, val_all, logging,
                     layer_idx=None, num_layers=None):
+        if not self.quantizers:
+            logging.info(f"Skipping GSQ training for layer {layer_name} since no quantizers were set up.")
+            return
         if logging is not None:
             logging = logging.logger
-        if not self.quantizers:
-            if self.global_rank == 0:
-                logging.info(f"Skipping GSQ training for layer {layer_name} since no quantizers were set up.")
-            return
+
+        train_all = self._pin_input_if_needed(train_all)
+        val_all = self._pin_input_if_needed(val_all)
+
         num_epochs = self.config.training.num_epochs
-        num_samples = train_all['input'].shape[0]
+        num_samples = train_all["input"].shape[0]
+        val_num_samples = val_all["input"].shape[0]
+
         batch_size = self.config.data.batch_size // self.world_size
+        batch_size = max(1, batch_size)
 
         self.optimizer = Lion(self.optimizer_params, betas=tuple(self.config.training.lion_betas))
 
-        num_training_steps = (num_samples + batch_size - 1) // batch_size * num_epochs
+        self.quant_params = []
+        for _, quantizer in self.quantizers.items():
+            self.quant_params.append(quantizer.quant_logits)
+
         steps_per_epoch = (num_samples + batch_size - 1) // batch_size
+        num_training_steps = steps_per_epoch * num_epochs
+
         self.scheduler = CustomLRScheduler(
-            self.optimizer, num_training_steps,
+            self.optimizer,
+            num_training_steps,
             self.config.training.warmup_steps,
             lr_decay_type=self.config.training.lr_decay_type,
             min_lr=self.config.training.scheduler_min_lr,
         )
-        
+
         initial_temperature, final_temperature = self.config.quantization.temperature
         initial_scale, final_scale = self.config.quantization.scale
 
@@ -105,127 +157,133 @@ class QuantizationTrainer:
         step_report_interval = max(1, steps_per_epoch // self.config.logging.step_report_divisor)
 
         micro = max(1, self.config.training.device_microbatch_size)
+
         for epoch in range(num_epochs):
-            t = epoch / (num_epochs - 1) if num_epochs > 1 else 0.0
-            temperature = initial_temperature + (final_temperature - initial_temperature) * t
-            scale = initial_scale + (final_scale - initial_scale) * t
-
-            if epoch == 0:
-                val_soft_losses, val_hard_losses = [], []
-                
-                num_batches = (val_all['input'].shape[0] + batch_size - 1) // batch_size
-                
-                with torch.no_grad():
-                    for batch_idx in range(num_batches):
-                        start_idx = batch_idx*batch_size
-                        end_idx = min((batch_idx+1)*batch_size,num_samples)
-                        
-                        val_soft_loss, val_hard_loss = self.validation_step(
-                            val_all['input'][start_idx:end_idx],
-                            temperature, 
-                            scale,
-                            micro
-                        )
-                        val_soft_losses.append(val_soft_loss)
-                        val_hard_losses.append(val_hard_loss)
-
-            epoch_losses = []
             epoch_start = time.time()
 
-            for indices in self.get_random_batch_indices(num_samples, batch_size):
-                temperature = initial_temperature + (final_temperature - initial_temperature) * step / (num_training_steps - 1)
-                scale = initial_scale + (final_scale - initial_scale) * step / (num_training_steps - 1)
-                loss = self.train_step(
-                    train_all['input'][indices],
-                    temperature, 
-                    scale,
-                    micro
+            if epoch == 0:
+                temperature = initial_temperature
+                scale = initial_scale
+
+                val_soft_losses, val_hard_losses = self.run_validation_epoch(
+                    val_all=val_all,
+                    val_num_samples=val_num_samples,
+                    batch_size=batch_size,
+                    temperature=temperature,
+                    scale=scale,
+                    microbatch_size=micro
                 )
+
+                if self.global_rank == 0:
+                    print(sum(val_hard_losses) / max(1, len(val_hard_losses)))
+
+            epoch_losses = []
+
+            batch_iter = self.make_cpu_batch_iter(
+                x=train_all["input"],
+                num_samples=num_samples,
+                batch_size=batch_size,
+                shuffle=True
+            )
+
+            prefetcher = CUDAPrefetcher(batch_iter, device=self.device, dtype=self.dtype)
+
+            while True:
+                batch_gpu = prefetcher.next()
+                if batch_gpu is None:
+                    break
+
+                progress_denom = max(1, num_training_steps - 1)
+
+                temperature = initial_temperature + (final_temperature - initial_temperature) * step / progress_denom
+
+                scale = initial_scale + (final_scale - initial_scale) * step / progress_denom
+
+                loss = self.train_step_gpu(
+                    batch_gpu=batch_gpu,
+                    temperature=temperature,
+                    scale=scale,
+                    microbatch_size=micro
+                )
+
                 epoch_losses.append(loss)
 
                 if self.global_rank == 0:
-                    report_gumbel_step(step, num_training_steps, loss,
-                                       interval=step_report_interval)
+                    report_gumbel_step(
+                        step,
+                        num_training_steps,
+                        loss,
+                        interval=step_report_interval
+                    )
 
                 if self.config.wandb.enabled and self.global_rank == 0:
-                    current_lr = self.optimizer.param_groups[0]['lr']
-                    wandb.log({
-                        "train/step_loss": loss,
-                        "train/learning_rate": current_lr,
-                        "train/temperature": temperature,
-                        "train/scale": scale,
-                        "train/global_step": step,
-                    })
+                    current_lr = self.optimizer.param_groups[0]["lr"]
+                    wandb.log(
+                        {
+                            "train/step_loss": loss,
+                            "train/learning_rate": current_lr,
+                            "train/temperature": temperature,
+                            "train/scale": scale,
+                            "train/global_step": step
+                        }
+                    )
 
                 step += 1
 
-            val_soft_losses, val_hard_losses = [], []
-            
-            num_batches = (val_all['input'].shape[0] + batch_size - 1) // batch_size
-            
-            with torch.no_grad():
-                for batch_idx in range(num_batches):
-                    start_idx = batch_idx*batch_size
-                    end_idx = min((batch_idx+1)*batch_size,val_all['input'].shape[0])
-                    
-                    val_soft_loss, val_hard_loss = self.validation_step(
-                        val_all['input'][start_idx:end_idx],
-                        temperature, 
-                        scale,
-                        micro
-                    )
-                    val_soft_losses.append(val_soft_loss)
-                    val_hard_losses.append(val_hard_loss)
-            
-            avg_train_loss = sum(epoch_losses) / len(epoch_losses)
-            avg_val_soft_loss = sum(val_soft_losses) / len(val_soft_losses)
-            avg_val_hard_loss = sum(val_hard_losses) / len(val_hard_losses)
+            val_soft_losses, val_hard_losses = self.run_validation_epoch(
+                val_all=val_all,
+                val_num_samples=val_num_samples,
+                batch_size=batch_size,
+                temperature=temperature,
+                scale=scale,
+                microbatch_size=micro
+            )
+
+            avg_train_loss = sum(epoch_losses) / max(1, len(epoch_losses))
+            avg_val_soft_loss = sum(val_soft_losses) / max(1, len(val_soft_losses))
+            avg_val_hard_loss = sum(val_hard_losses) / max(1, len(val_hard_losses))
+
             epoch_time = time.time() - epoch_start
             phase_elapsed = time.time() - phase_start
 
-            if self.global_rank == 0:
+            if self.global_rank == 0 and logging is not None:
                 logging.info(
-                    f'Layer {layer_name} - Epoch {epoch+1}: '
-                    f'Train Loss = {avg_train_loss:.2e}, '
-                    f'Val Soft Loss = {avg_val_soft_loss:.2e}, '
-                    f'Val Hard Loss = {avg_val_hard_loss:.2e}'
+                    f"Layer {layer_name} - Epoch {epoch + 1}: "
+                    f"Train Loss = {avg_train_loss:.2e}, "
+                    f"Val Soft Loss = {avg_val_soft_loss:.2e}, "
+                    f"Val Hard Loss = {avg_val_hard_loss:.2e}"
                 )
+
                 report_gumbel_epoch(
-                    layer_name, epoch, num_epochs, phase_elapsed,
+                    layer_name,
+                    epoch,
+                    num_epochs,
+                    phase_elapsed,
                     avg_train_loss=avg_train_loss,
                     avg_val_loss=avg_val_hard_loss,
                     epoch_time=epoch_time,
                     temperature=temperature,
-                    scale=scale,
+                    scale=scale
                 )
-            
-            if self.config.wandb.enabled and self.global_rank == 0:
-                wandb.log({
-                    f"{layer_name}/train_loss": avg_train_loss,
-                    f"{layer_name}/val_soft_loss": avg_val_soft_loss,
-                    f"{layer_name}/val_hard_loss": avg_val_hard_loss,
-                    f"{layer_name}/temperature": temperature,
-                    f"{layer_name}/scale": scale,
-                    f"{layer_name}/epoch": epoch + 1,
-                    f"{layer_name}/epoch_time_sec": epoch_time,
-                })
 
-            torch.cuda.synchronize(self.device)
-            torch.cuda.empty_cache()
+            if self.config.wandb.enabled and self.global_rank == 0:
+                wandb.log(
+                    {
+                        f"{layer_name}/train_loss": avg_train_loss,
+                        f"{layer_name}/val_soft_loss": avg_val_soft_loss,
+                        f"{layer_name}/val_hard_loss": avg_val_hard_loss,
+                        f"{layer_name}/temperature": temperature,
+                        f"{layer_name}/scale": scale,
+                        f"{layer_name}/epoch": epoch + 1,
+                        f"{layer_name}/epoch_time_sec": epoch_time
+                    }
+                )
 
         if self.use_dist:
-            if logging is not None and self.global_rank == 0:
-                report_pipeline(f"Syncing ranks before writing checkpoints ({layer_name})")
             dist.barrier()
 
-        if logging is not None and self.global_rank == 0:
-            if self.train_attn:
-                report_pipeline(f"Applying quantized attention weights in-place ({layer_name})")
-            else:
-                report_pipeline(f"Writing quantized shard(s) to disk ({layer_name})")
-
         for tensor_name, quantizer in self.quantizers.items():
-            if self.train_attn:
+            if self.train_attn or self.model.current_layer_idx == -1:
                 self.model.update_quantized_weights(tensor_name, quantizer.get_hard_weights())
             else:
                 if "gate_proj" in tensor_name:
@@ -238,70 +296,129 @@ class QuantizationTrainer:
                     if self.model.is_moe or self.global_rank == 0:
                         self.model.save_to_disc(base, pairs)
 
-        if logging is not None and self.global_rank == 0:
-            report_pipeline(f"Finished writing layer checkpoint ({layer_name})")
-
         if self.use_dist:
-            if logging is not None and self.global_rank == 0:
-                report_pipeline("Shard writes done; syncing ranks before next phase")
             dist.barrier()
         self.quantizers.clear()
 
         del self.optimizer, self.optimizer_params, self.quantizers
         torch.cuda.empty_cache()
         
-    def train_step(self, batch, temperature, scale, microbatch_size):
+    def make_cpu_batch_iter(self, x, num_samples, batch_size, shuffle=True):
+        starts = torch.arange(0, num_samples, batch_size)
+
+        if shuffle:
+            order = torch.randperm(len(starts))
+            starts = starts[order]
+
+        if self.use_dist:
+            starts = starts.to(self.device)
+            dist.broadcast(starts, src=0)
+            starts = starts.cpu()
+
+        for start in starts.tolist():
+            end = min(start + batch_size, num_samples)
+            yield x[start:end]
+
+    def run_validation_epoch(
+        self,
+        val_all,
+        val_num_samples,
+        batch_size,
+        temperature,
+        scale,
+        microbatch_size
+    ):
+        val_soft_losses = []
+        val_hard_losses = []
+
+        batch_iter = self.make_cpu_batch_iter(
+            x=val_all["input"],
+            num_samples=val_num_samples,
+            batch_size=batch_size,
+            shuffle=False
+        )
+
+        prefetcher = CUDAPrefetcher(batch_iter, device=self.device, dtype=self.dtype)
+
+        with torch.no_grad():
+            while True:
+                batch_gpu = prefetcher.next()
+                if batch_gpu is None:
+                    break
+
+                val_soft_loss, val_hard_loss = self.validation_step_gpu(
+                    batch_gpu=batch_gpu,
+                    temperature=temperature,
+                    scale=scale,
+                    microbatch_size=microbatch_size
+                )
+
+                val_soft_losses.append(val_soft_loss)
+                val_hard_losses.append(val_hard_loss)
+
+        return val_soft_losses, val_hard_losses
+
+    def train_step_gpu(self, batch_gpu, temperature, scale, microbatch_size):
         self.optimizer.zero_grad(set_to_none=True)
 
-        batch_size, seq_len, hidden_dim = batch.shape
-        accumulation_steps = max(1, batch_size // microbatch_size)
+        batch_size = batch_gpu.shape[0]
+        microbatch_size = max(1, microbatch_size)
+        accumulation_steps = (batch_size + microbatch_size - 1) // microbatch_size
 
-        total_loss = 0.0
+        total_loss_tensor = None
 
-        for i in range(accumulation_steps):
-            micro_batch = batch[i*microbatch_size:(i+1)*microbatch_size]
+        for start in range(0, batch_size, microbatch_size):
+            micro_batch = batch_gpu[start:start + microbatch_size]
 
-            quantized_weights = {}
-            for tensor_name, quantizer in self.quantizers.items():
-                if self.use_dist and self.model.is_moe:
-                    prefix, leaf = tensor_name.rsplit(".", 1)
-                    if prefix not in quantized_weights:
-                        quantized_weights[prefix] = {}
-                    quantized_weights[prefix][leaf] = quantizer.forward(temperature, scale)
-                else:
-                    quantized_weights[tensor_name] = quantizer.forward(temperature, scale)
+            quantized_weights = self._build_weights(mode="soft", temperature=temperature, scale=scale)
 
             soft_loss = self.model.calculate_mse(
-                micro_batch.to(self.device), quantized_weights, self.train_attn,
+                micro_batch,
+                quantized_weights,
+                self.train_attn,
                 accumulation_steps=accumulation_steps
             )
-            total_loss += soft_loss / accumulation_steps
+
+            loss = soft_loss / accumulation_steps
+
+            if total_loss_tensor is None:
+                total_loss_tensor = loss
+            else:
+                total_loss_tensor = total_loss_tensor + loss
 
         self.scheduler.step()
+
         if not self.model.is_moe and self.use_dist:
             self.average_grads()
+
         self.optimizer.step()
 
         quantized_weights.clear()
 
         if self.use_dist:
             pg = dist.group.WORLD
-            t = torch.tensor(total_loss, device=self.device, dtype=torch.float32)
+            t = total_loss_tensor.to(device=self.device, dtype=torch.float32)
+
             if self.model.is_moe:
                 dist.all_reduce(t, op=dist.ReduceOp.SUM, group=pg)
             else:
                 dist.all_reduce(t, op=dist.ReduceOp.AVG, group=pg)
-            total_loss = t.item()
-        
-        return total_loss
+
+            return t.item()
+
+        return total_loss_tensor.item()
 
     def _build_weights(self, mode, temperature, scale):
         weights = {}
+
         for tensor_name, quantizer in self.quantizers.items():
-            if mode == 'soft':
+            if mode == "soft":
                 w = quantizer.forward(temperature, scale)
-            else:
+            elif mode == "hard":
                 w = quantizer.get_hard_weights()[0]
+            else:
+                raise ValueError(f"Unknown weight mode: {mode}")
+
             if self.use_dist and self.model.is_moe:
                 prefix, leaf = tensor_name.rsplit(".", 1)
                 if prefix not in weights:
@@ -309,51 +426,75 @@ class QuantizationTrainer:
                 weights[prefix][leaf] = w
             else:
                 weights[tensor_name] = w
+
         return weights
 
-    def validation_step(self, batch, temperature, scale, microbatch_size):
-        batch_size, seq_len, hidden_dim = batch.shape
+    def validation_step_gpu(self, batch_gpu, temperature, scale, microbatch_size):
+        batch_size = batch_gpu.shape[0]
         microbatch_size = max(1, microbatch_size)
-        accumulation_steps = max(1, batch_size // microbatch_size)
+        accumulation_steps = (batch_size + microbatch_size - 1) // microbatch_size
 
-        total_soft_loss = 0.0
-        total_hard_loss = 0.0
+        total_soft_loss = None
+        total_hard_loss = None
 
-        soft_weights = self._build_weights('soft', temperature, scale)
-        for i in range(accumulation_steps):
-            micro_batch = batch[i*microbatch_size:(i+1)*microbatch_size].to(self.device)
-            total_soft_loss += self.model.calculate_mse(micro_batch, soft_weights, self.train_attn, validation=True) / accumulation_steps
+        for start in range(0, batch_size, microbatch_size):
+            micro_batch = batch_gpu[start:start + microbatch_size]
+
+            soft_weights = self._build_weights(mode="soft", temperature=temperature, scale=scale)
+
+            loss = self.model.calculate_mse(
+                micro_batch,
+                soft_weights,
+                self.train_attn,
+                validation=True
+            )
+
+            loss = loss / accumulation_steps
+
+            if total_soft_loss is None:
+                total_soft_loss = loss
+            else:
+                total_soft_loss = total_soft_loss + loss
+
         soft_weights.clear()
 
-        hard_weights = self._build_weights('hard', temperature, scale)
-        for i in range(accumulation_steps):
-            micro_batch = batch[i*microbatch_size:(i+1)*microbatch_size].to(self.device)
-            total_hard_loss += self.model.calculate_mse(micro_batch, hard_weights, self.train_attn, validation=True) / accumulation_steps
+        hard_weights = self._build_weights(mode="hard", temperature=temperature, scale=scale)
+
+        for start in range(0, batch_size, microbatch_size):
+            micro_batch = batch_gpu[start:start + microbatch_size]
+
+            loss = self.model.calculate_mse(
+                micro_batch,
+                hard_weights,
+                self.train_attn,
+                validation=True
+            )
+
+            loss = loss / accumulation_steps
+
+            if total_hard_loss is None:
+                total_hard_loss = loss
+            else:
+                total_hard_loss = total_hard_loss + loss
+
         hard_weights.clear()
 
         if self.use_dist:
             pg = dist.group.WORLD
-            t_soft = torch.tensor(total_soft_loss, device=self.device, dtype=torch.float32)
-            t_hard = torch.tensor(total_hard_loss, device=self.device, dtype=torch.float32)
+
+            t_soft = total_soft_loss.to(device=self.device, dtype=torch.float32)
+            t_hard = total_hard_loss.to(device=self.device, dtype=torch.float32)
+
             if self.model.is_moe:
                 dist.all_reduce(t_soft, op=dist.ReduceOp.SUM, group=pg)
                 dist.all_reduce(t_hard, op=dist.ReduceOp.SUM, group=pg)
             else:
                 dist.all_reduce(t_soft, op=dist.ReduceOp.AVG, group=pg)
                 dist.all_reduce(t_hard, op=dist.ReduceOp.AVG, group=pg)
-            total_soft_loss = t_soft.item()
-            total_hard_loss = t_hard.item()
 
-        return total_soft_loss, total_hard_loss
-    
-    def get_random_batch_indices(self, num_samples, batch_size):
-        perm = torch.randperm(num_samples)
-        if self.use_dist:
-            perm = perm.to(self.device)
-            dist.broadcast(perm, src=0)
-            perm = perm.cpu()
-        for i in range(0, num_samples, batch_size):
-            yield perm[i:i+batch_size]
+            return t_soft.item(), t_hard.item()
+
+        return total_soft_loss.item(), total_hard_loss.item()
 
     def average_grads(self):
         for group in self.optimizer.param_groups:
