@@ -11,10 +11,9 @@ from src.quantization import *
 from src.utils.progress_reporter import report_gumbel_epoch, report_gumbel_step
 
 class CUDAPrefetcher:
-    def __init__(self, iterable, device, dtype):
+    def __init__(self, iterable, device):
         self.iterable = iter(iterable)
         self.device = device
-        self.dtype = dtype
         self.stream = torch.cuda.Stream(device=device)
         self.next_batch = None
         self.preload()
@@ -27,11 +26,7 @@ class CUDAPrefetcher:
             return
 
         with torch.cuda.stream(self.stream):
-            self.next_batch = batch.to(
-                device=self.device,
-                dtype=self.dtype,
-                non_blocking=True,
-            )
+            self.next_batch = batch.to(device=self.device, non_blocking=True)
 
     def next(self):
         torch.cuda.current_stream(self.device).wait_stream(self.stream)
@@ -146,7 +141,7 @@ class QuantizationTrainer:
             num_training_steps,
             self.config.training.warmup_steps,
             lr_decay_type=self.config.training.lr_decay_type,
-            min_lr=self.config.training.scheduler_min_lr,
+            min_lr=self.config.training.scheduler_min_lr
         )
 
         initial_temperature, final_temperature = self.config.quantization.temperature
@@ -186,7 +181,7 @@ class QuantizationTrainer:
                 shuffle=True
             )
 
-            prefetcher = CUDAPrefetcher(batch_iter, device=self.device, dtype=self.dtype)
+            prefetcher = CUDAPrefetcher(batch_iter, device=self.device)
 
             while True:
                 batch_gpu = prefetcher.next()
@@ -304,13 +299,13 @@ class QuantizationTrainer:
         torch.cuda.empty_cache()
         
     def make_cpu_batch_iter(self, x, num_samples, batch_size, shuffle=True):
-        starts = torch.arange(0, num_samples, batch_size)
         if shuffle:
-            order = torch.randperm(len(starts))
-            starts = starts[order]
-        for start in starts.tolist():
-            end = min(start + batch_size, num_samples)
-            yield x[start:end]
+            perm = torch.randperm(num_samples)
+        else:
+            perm = torch.arange(num_samples)
+
+        for i in range(0, num_samples, batch_size):
+            yield x[perm[i:i + batch_size]]
 
     def run_validation_epoch(
         self,
@@ -331,7 +326,7 @@ class QuantizationTrainer:
             shuffle=False
         )
 
-        prefetcher = CUDAPrefetcher(batch_iter, device=self.device, dtype=self.dtype)
+        prefetcher = CUDAPrefetcher(batch_iter, device=self.device)
 
         with torch.no_grad():
             while True:
@@ -358,7 +353,7 @@ class QuantizationTrainer:
         microbatch_size = max(1, microbatch_size)
         accumulation_steps = (batch_size + microbatch_size - 1) // microbatch_size
 
-        total_loss_tensor = None
+        total_loss = None
 
         for start in range(0, batch_size, microbatch_size):
             micro_batch = batch_gpu[start:start + microbatch_size]
@@ -374,10 +369,10 @@ class QuantizationTrainer:
 
             loss = soft_loss / accumulation_steps
 
-            if total_loss_tensor is None:
-                total_loss_tensor = loss
+            if total_loss is None:
+                total_loss = loss
             else:
-                total_loss_tensor = total_loss_tensor + loss
+                total_loss = total_loss + loss
 
         self.scheduler.step()
 
@@ -390,7 +385,7 @@ class QuantizationTrainer:
 
         if self.use_dist:
             pg = dist.group.WORLD
-            t = total_loss_tensor.to(device=self.device, dtype=torch.float32)
+            t = torch.tensor(total_loss, device=self.device, dtype=torch.float32)
 
             if self.model.is_moe:
                 dist.all_reduce(t, op=dist.ReduceOp.SUM, group=pg)
@@ -399,7 +394,7 @@ class QuantizationTrainer:
 
             return t.item()
 
-        return total_loss_tensor.item()
+        return total_loss.item()
 
     def _build_weights(self, mode, temperature, scale):
         weights = {}
@@ -430,10 +425,10 @@ class QuantizationTrainer:
         total_soft_loss = None
         total_hard_loss = None
 
+        soft_weights = self._build_weights(mode="soft", temperature=temperature, scale=scale)
+
         for start in range(0, batch_size, microbatch_size):
             micro_batch = batch_gpu[start:start + microbatch_size]
-
-            soft_weights = self._build_weights(mode="soft", temperature=temperature, scale=scale)
 
             loss = self.model.calculate_mse(
                 micro_batch,
@@ -475,8 +470,8 @@ class QuantizationTrainer:
         if self.use_dist:
             pg = dist.group.WORLD
 
-            t_soft = total_soft_loss.to(device=self.device, dtype=torch.float32)
-            t_hard = total_hard_loss.to(device=self.device, dtype=torch.float32)
+            t_soft = torch.tensor(total_soft_loss, device=self.device, dtype=torch.float32)
+            t_hard = torch.tensor(total_hard_loss, device=self.device, dtype=torch.float32)
 
             if self.model.is_moe:
                 dist.all_reduce(t_soft, op=dist.ReduceOp.SUM, group=pg)
