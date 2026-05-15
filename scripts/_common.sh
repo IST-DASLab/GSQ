@@ -6,8 +6,11 @@ SCRATCH="${SCRATCH:-${REPO_ROOT}/runtime}"
 VENV_PATH="${VENV_PATH:-${REPO_ROOT}/.venv}"
 
 
-export HF_HOME=/nfs/scistore19/alistgrp/huggingface
-export HF_DATASETS_CACHE=/mnt/beegfs/alistgrp/stabesh/.cache/huggingface/datasets
+# HuggingFace cache: use the user's private beegfs cache as the single source
+# of truth. Anything missing will be downloaded on first use. Bigger pre-built
+# assets (e.g. Kimi-K2.5) can be hand-copied in from the shared cluster cache.
+export HF_HOME="${HF_HOME:-/mnt/beegfs/alistgrp/stabesh/.cache/huggingface}"
+mkdir -p "${HF_HOME}/hub" "${HF_HOME}/datasets" "${HF_HOME}/xet" 2>/dev/null || true
 
 
 if [[ -d "${VENV_PATH}" ]]; then

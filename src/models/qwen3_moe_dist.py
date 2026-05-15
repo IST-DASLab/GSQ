@@ -1,9 +1,8 @@
 import time
+import math
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import gc
-from contextlib import ExitStack
 from .qwen3_moe import Qwen3MoeWrapper
 from src.moe.placement import ExpertSharder
 from src.moe.autograd_ops import AllToAllTokens
@@ -52,6 +51,11 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                 for e in range(self.num_experts)
                 if self.sharder.owner(e) == self.rank
             ]
+            mlp_offload_params = [
+                f"{base}.mlp.experts.gate_up_proj",
+                f"{base}.mlp.experts.down_proj",
+            ]
+            return {"non_mlp": non_mlp, "mlp": local_expert, "mlp_offload_params": mlp_offload_params}
         return {"non_mlp": non_mlp, "mlp": local_expert}
 
     @torch.no_grad()
@@ -102,13 +106,11 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         hidden = layer.post_attention_layernorm(mlp_input_batch)
         x_flat = hidden.reshape(B * T, H)
 
-        router_logits = layer.mlp.gate(hidden)
-        routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float)
-        topw, topi = torch.topk(routing_weights, layer.mlp.top_k, dim=-1)
-        if layer.mlp.norm_topk_prob:
-            topw = topw / topw.sum(dim=-1, keepdim=True)
+        router = layer.mlp.gate
+        _, topw, topi = router(hidden.reshape(-1, H))
+        top_k = router.top_k
 
-        tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(layer.mlp.top_k)
+        tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(top_k)
         eid_flat = topi.reshape(-1).to(torch.long)
         w_flat = topw.reshape(-1).to(self.dtype)
 
@@ -135,48 +137,17 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
 
         return x_flat, hidden, send_idx_flat, in_split_sizes, out_split_sizes, xin, win, eids, B, T, H
 
-    def _batched_expert_forward(self, xin, eids, quantized_weights=None):
-        """Process all local experts in a single batched pass."""
-        layer = self.get_layer_module(self.current_layer_idx)
-        layer_key = self.get_current_layer()
+    def _batched_expert_forward(self, xin, eids, quantized_weights=None, gpts_calib=None):
+        return self._fused_expert_forward_batched(
+            xin, eids, quantized_weights=quantized_weights, gpts_calib=gpts_calib)
 
-        eids_long = eids.to(torch.long)
-        unique_eids, inverse, counts = torch.unique(eids_long, sorted=True, return_inverse=True, return_counts=True)
-
-        sort_idx = torch.argsort(inverse, stable=True)
-        sorted_x = xin.index_select(0, sort_idx)
-
-        out_buf = torch.empty_like(sorted_x)
-
-        offset = 0
-        for i, eid_val in enumerate(unique_eids.tolist()):
-            n = counts[i].item()
-            inp_e = sorted_x[offset:offset + n]
-            expert = layer.mlp.experts[eid_val]
-
-            if quantized_weights is not None:
-                key = f"{layer_key}.mlp.experts.{eid_val}"
-                qw = quantized_weights[key]
-                gate_out = F.linear(inp_e, qw["gate_proj"][0] if isinstance(qw["gate_proj"], tuple) else qw["gate_proj"])
-                up_out = F.linear(inp_e, qw["up_proj"][0] if isinstance(qw["up_proj"], tuple) else qw["up_proj"])
-                hidden = F.silu(gate_out) * up_out
-                out_e = F.linear(hidden, qw["down_proj"][0] if isinstance(qw["down_proj"], tuple) else qw["down_proj"])
-            else:
-                out_e = expert(inp_e)
-
-            out_buf[offset:offset + n] = out_e
-            offset += n
-
-        unsort_idx = torch.argsort(sort_idx)
-        return out_buf.index_select(0, unsort_idx)
-
-    def run_expert_parallel(self, mlp_input_batch, quantized_weights=None):
+    def run_expert_parallel(self, mlp_input_batch, quantized_weights=None, gpts_calib=None):
         pg = dist.group.WORLD
 
         x_flat, hidden, send_idx_flat, in_split_sizes, out_split_sizes, xin, win, eids, B, T, H = \
             self._dispatch_tokens(mlp_input_batch)
 
-        out_local = self._batched_expert_forward(xin, eids, quantized_weights)
+        out_local = self._batched_expert_forward(xin, eids, quantized_weights, gpts_calib=gpts_calib)
         xin = out_local * win
 
         returned = AllToAllTokens.apply(xin, in_split_sizes, out_split_sizes, pg)
@@ -186,36 +157,6 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         y = y_flat.view(B, T, H)
 
         return y + mlp_input_batch
-
-    def _forward_single_expert(self, layer, expert_id, x_e, quantized_weights):
-        expert = layer.mlp.experts[expert_id]
-
-        class LinearWeightHook:
-            def __init__(self, module, qweight):
-                self.module = module
-                self.qw = qweight
-                self.saved = module.forward
-            def __enter__(self):
-                def new_forward(module_self, x):
-                    return F.linear(x, self.qw, self.module.bias)
-                self.module.forward = new_forward.__get__(self.module, torch.nn.Linear)
-            def __exit__(self, a, b, c):
-                self.module.forward = self.saved
-
-        hooks = []
-        try:
-            if quantized_weights is not None:
-                for name, module in expert.named_modules():
-                    if isinstance(module, torch.nn.Linear):
-                        key = f"{self.get_current_layer()}.mlp.experts.{expert_id}"
-                        hooks.append(LinearWeightHook(module, quantized_weights[key][name]))
-            with ExitStack() as stack:
-                for h in hooks:
-                    stack.enter_context(h)
-                out = expert(x_e)
-            return out
-        finally:
-            hooks.clear()
 
     def calculate_mse(self, mlp_input_batch, quantized_weights, self_attn=False, validation=False, accumulation_steps=1):
         if not self._is_moe_layer(self.current_layer_idx):
@@ -233,11 +174,11 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
             hidden = layer.post_attention_layernorm(mlp_input_batch)
             x_flat = hidden.reshape(B * T, H)
 
-            router_logits = layer.mlp.gate(hidden)
-            routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float)
-            _, topi = torch.topk(routing_weights, layer.mlp.top_k, dim=-1)
+            router = layer.mlp.gate
+            _, _, topi = router(hidden.reshape(-1, H))
+            top_k = router.top_k
 
-            tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(layer.mlp.top_k)
+            tok_idx_flat = torch.arange(B * T, device=device, dtype=torch.long).repeat_interleave(top_k)
             eid_flat = topi.reshape(-1).to(torch.long)
 
             owner_lut = self._owner_lut.to(device)
@@ -285,11 +226,9 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         subset = {}
 
         for e in owned_experts:
-            expert = layer.mlp.experts[e]
             base_prefix = f"{self.get_current_layer()}.mlp.experts.{e}"
-            for name, module in expert.named_modules():
-                if isinstance(module, torch.nn.Linear):
-                    subset[f"{base_prefix}.{name}"] = module
+            for proj in ("gate_proj", "up_proj", "down_proj"):
+                subset[f"{base_prefix}.{proj}"] = self._virtual_expert_linear(layer_idx, e, proj)
 
         init_method = config.quantization.init_method
         gsq_enabled = config.quantization.gsq_enabled
@@ -319,39 +258,24 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
                     config.gptq.wbits, perchannel=True, sym=config.gptq.sym, mse=True, trits=config.gptq.trits
                 )
 
-        def _add_batch(full_key):
-            def _hook(_, inp, out):
-                gpts[full_key].add_batch(inp[0].data, out.data)
-            return _hook
-
-        handles = []
         n_hessian = config.gptq.nsamples // self.world_size
-        try:
-            for full_name, module in subset.items():
-                if "up_proj" in full_name:
-                    continue
-                handles.append(module.register_forward_hook(_add_batch(full_name)))
+        calib_start = time.time()
+        calib_report_interval = max(1, n_hessian // self.calib_report_divisor)
+        with torch.no_grad():
+            for j in range(n_hessian):
+                x = gpt_all['input'][j].unsqueeze(0).to(self.device, non_blocking=True)
 
-            calib_start = time.time()
-            calib_report_interval = max(1, n_hessian // self.calib_report_divisor)
-            with torch.no_grad():
-                for j in range(n_hessian):
-                    x = gpt_all['input'][j].unsqueeze(0).to(self.device, non_blocking=True)
+                additional_layer_inputs = {"attention_mask": None}
+                for k, v in self.kwargs.items():
+                    additional_layer_inputs[k] = v
 
-                    additional_layer_inputs = {"attention_mask": None}
-                    for k, v in self.kwargs.items():
-                        additional_layer_inputs[k] = v
+                hidden_states = layer.input_layernorm(x)
+                attn_out, _ = layer.self_attn(hidden_states, **additional_layer_inputs)
+                x = x + attn_out
 
-                    hidden_states = layer.input_layernorm(x)
-                    attn_out, _ = layer.self_attn(hidden_states, **additional_layer_inputs)
-                    x = x + attn_out
-
-                    _ = self.run_expert_parallel(x, quantized_weights=None)
-                    if rank == 0 and (j + 1) % calib_report_interval == 0:
-                        report_gptq_calib(j + 1, n_hessian, time.time() - calib_start)
-        finally:
-            for h in handles:
-                h.remove()
+                _ = self.run_expert_parallel(x, quantized_weights=None, gpts_calib=gpts)
+                if rank == 0 and (j + 1) % calib_report_interval == 0:
+                    report_gptq_calib(j + 1, n_hessian, time.time() - calib_start)
 
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -542,3 +466,26 @@ class Qwen3MoeDistributedWrapper(Qwen3MoeWrapper):
         gc.collect()
         torch.cuda.empty_cache()
         return ppl
+
+    def save_moe_experts_to_disc(self):
+        if not self._is_moe_layer(self.current_layer_idx):
+            return
+        layer_key = self.get_current_layer()
+        owned = [e for e in range(self.num_experts) if self.sharder.owner(e) == self.rank]
+        for e in owned:
+            base = f"{layer_key}.mlp.experts.{e}"
+            gk = f"{base}.gate_proj"
+            if gk not in self.temp_weights:
+                continue
+            pairs = {
+                "gate_proj": (self.temp_weights[gk], self.temp_weights[f"{gk}.scale"]),
+                "up_proj": (
+                    self.temp_weights[f"{base}.up_proj"],
+                    self.temp_weights[f"{base}.up_proj.scale"],
+                ),
+                "down_proj": (
+                    self.temp_weights[f"{base}.down_proj"],
+                    self.temp_weights[f"{base}.down_proj.scale"],
+                ),
+            }
+            self.save_to_disc(base, pairs)

@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import torch
 import torch.nn as nn
@@ -101,6 +102,57 @@ class BaseModelWrapper(ABC):
           })
         self.temp_weights = {}
         self.is_moe = False
+        self.fused_experts = False
+        self.fused_expert_intermediate_size = None
+
+    _FUSED_EXPERT_WEIGHT_KEY_RE = re.compile(
+        r"^(.+\.layers\.\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$"
+    )
+    _FUSED_EXPERT_MODULE_RE = re.compile(
+        r"^(.+\.layers\.\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)$"
+    )
+
+    def _parse_fused_expert_weight_param_name(self, name):
+        m = self._FUSED_EXPERT_WEIGHT_KEY_RE.match(name)
+        if m:
+            return m.group(1), int(m.group(2)), m.group(3)
+        return None
+
+    def _parse_fused_expert_module_base(self, base_name):
+        m = self._FUSED_EXPERT_MODULE_RE.match(base_name)
+        if m:
+            return m.group(1), int(m.group(2)), m.group(3)
+        return None
+
+    def _ensure_fused_expert_param_materialized(self, param_name):
+        param_name = param_name.replace(".language_model", "")
+        params = dict(self.model.named_parameters())
+        if param_name not in params:
+            return
+        p = params[param_name]
+        if p.device.type != "meta":
+            return
+        zeros = torch.zeros(p.shape, dtype=self.dtype, device=self.device)
+        set_module_tensor_to_device(self.model, param_name, self.device, value=zeros, dtype=self.dtype)
+
+    def _write_fused_expert_slice(self, layer_prefix, expert_idx, proj_kind, tensor_value):
+        if self.fused_expert_intermediate_size is None:
+            raise RuntimeError("fused_expert_intermediate_size must be set when fused_experts=True")
+        intermediate_dim = self.fused_expert_intermediate_size
+        experts_path = f"{layer_prefix}.mlp.experts"
+        gate_up_name = f"{experts_path}.gate_up_proj"
+        down_name = f"{experts_path}.down_proj"
+        self._ensure_fused_expert_param_materialized(gate_up_name)
+        self._ensure_fused_expert_param_materialized(down_name)
+        experts_mod = self.model.get_submodule(experts_path.replace(".language_model", ""))
+        t = tensor_value.to(device=self.device, dtype=experts_mod.gate_up_proj.dtype)
+        with torch.no_grad():
+            if proj_kind == "gate_proj":
+                experts_mod.gate_up_proj.data[expert_idx, :intermediate_dim, :].copy_(t)
+            elif proj_kind == "up_proj":
+                experts_mod.gate_up_proj.data[expert_idx, intermediate_dim : 2 * intermediate_dim, :].copy_(t)
+            else:
+                experts_mod.down_proj.data[expert_idx, :, :].copy_(t)
 
     def resolve_model_path(self, model_name):
         p = Path(model_name)
@@ -158,7 +210,7 @@ class BaseModelWrapper(ABC):
 
         def wanted(name):
             for p in prefixes:
-                if name == p or p in name:
+                if name == p or name.startswith(p + "."):
                     return True
             return False
 
@@ -193,6 +245,12 @@ class BaseModelWrapper(ABC):
                         continue
                     t = f.get_tensor(ckpt_name)
                     model_name = ckpt_name.replace(".language_model", "")
+                    if self.fused_experts:
+                        parsed = self._parse_fused_expert_weight_param_name(model_name)
+                        if parsed:
+                            layer_prefix, eid, proj = parsed
+                            self._write_fused_expert_slice(layer_prefix, eid, proj, t)
+                            continue
                     set_module_tensor_to_device(self.model, model_name, self.device, value=t, dtype=t.dtype)
 
     def move_layer_to_gpu(self, layer_name):
@@ -211,8 +269,15 @@ class BaseModelWrapper(ABC):
 
     def offload_to_meta(self, layer_name):
         prefixes = self._layer_prefixes(layer_name)
-        pairs = self._names_from_ckpt(prefixes["non_mlp"] + prefixes["mlp"])
-        self._offload_names_to_meta(pairs)
+        non_pairs = self._names_from_ckpt(prefixes["non_mlp"])
+        self._offload_names_to_meta(non_pairs)
+        if self.fused_experts and prefixes.get("mlp_offload_params"):
+            for pname in prefixes["mlp_offload_params"]:
+                n = pname.replace(".language_model", "")
+                set_module_tensor_to_device(self.model, n, "meta")
+        else:
+            pairs = self._names_from_ckpt(prefixes["mlp"])
+            self._offload_names_to_meta(pairs)
 
     @torch.no_grad()
     def get_inputs(self, data_dict, data_loader):
@@ -550,7 +615,9 @@ class BaseModelWrapper(ABC):
             prefixes = [prefixes]
 
         files = {}
-        for item in prefixes:
+        for item in ("non_mlp", "mlp"):
+            if item not in prefixes:
+                continue
             for p in prefixes[item]:
                 base = p.replace('.', '_')
                 st = os.path.join(self.save_dir, f"{base}.safetensors")
@@ -574,9 +641,24 @@ class BaseModelWrapper(ABC):
                     )
                     W_deq = decompressed["weight"]
 
-                    set_module_tensor_to_device(self.model, f"{base}.weight".replace(".language_model", ""), self.device, value=W_deq, dtype=self.dtype)
+                    weight_key = f"{base}.weight".replace(".language_model", "")
+                    if self.fused_experts:
+                        mod_base = base.replace(".language_model", "")
+                        parsed = self._parse_fused_expert_module_base(mod_base)
+                        if parsed:
+                            lp, eid, proj = parsed
+                            self._write_fused_expert_slice(lp, eid, proj, W_deq)
+                            continue
+                    set_module_tensor_to_device(self.model, weight_key, self.device, value=W_deq, dtype=self.dtype)
                     continue
-                set_module_tensor_to_device(self.model, name.replace(".language_model", ""), self.device, value=tensors[name], dtype=self.dtype)
+                model_key = name.replace(".language_model", "")
+                if self.fused_experts:
+                    parsed = self._parse_fused_expert_weight_param_name(model_key)
+                    if parsed:
+                        lp, eid, proj = parsed
+                        self._write_fused_expert_slice(lp, eid, proj, tensors[name])
+                        continue
+                set_module_tensor_to_device(self.model, model_key, self.device, value=tensors[name], dtype=self.dtype)
         current_layer = self.get_layer_module(self.current_layer_idx)
 
     @abstractmethod

@@ -16,7 +16,7 @@ set -euo pipefail
 source "$(dirname "$0")/_common.sh"
 
 export HF_HOME="${HF_HOME:-/nfs/scistore19/alistgrp/huggingface}"
-export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
 export SCRATCH="${SCRATCH:-${REPO_ROOT}/runtime}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-}"
 export NPROC="${NPROC:-8}"
