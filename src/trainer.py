@@ -305,16 +305,9 @@ class QuantizationTrainer:
         
     def make_cpu_batch_iter(self, x, num_samples, batch_size, shuffle=True):
         starts = torch.arange(0, num_samples, batch_size)
-
         if shuffle:
             order = torch.randperm(len(starts))
             starts = starts[order]
-
-        if self.use_dist:
-            starts = starts.to(self.device)
-            dist.broadcast(starts, src=0)
-            starts = starts.cpu()
-
         for start in starts.tolist():
             end = min(start + batch_size, num_samples)
             yield x[start:end]
