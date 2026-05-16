@@ -402,6 +402,13 @@ class FactorizedIQuantGSVQ(nn.Module):
         )
         return self.scales * mag * sign
 
+    def get_hard_indices(self) -> dict[str, torch.Tensor]:
+        row = torch.arange(self.magnitude_logits.shape[0], device=self.magnitude_logits.device)
+        return {
+            "magnitude_indices": self.magnitude_candidate_indices[row, self.magnitude_logits.argmax(dim=-1)],
+            "sign_indices": self.sign_candidate_indices[row, self.sign_logits.argmax(dim=-1)],
+        }
+
     def get_hard_weights(self):
         hard = self.get_hard_vectors()
         if self.output_shape is not None:
@@ -583,6 +590,18 @@ class PairedMagnitudeIQuantGSVQ(nn.Module):
         )
         sign = self._hard_codebook(self.sign_logits, self.sign_candidate_indices, self.sign_codebook)
         return self.scales * torch.cat([first, second], dim=-1) * sign
+
+    def get_hard_indices(self) -> dict[str, torch.Tensor]:
+        row = torch.arange(self.first_magnitude_logits.shape[0], device=self.first_magnitude_logits.device)
+        return {
+            "first_magnitude_indices": self.first_magnitude_candidate_indices[
+                row, self.first_magnitude_logits.argmax(dim=-1)
+            ],
+            "second_magnitude_indices": self.second_magnitude_candidate_indices[
+                row, self.second_magnitude_logits.argmax(dim=-1)
+            ],
+            "sign_indices": self.sign_candidate_indices[row, self.sign_logits.argmax(dim=-1)],
+        }
 
     def get_hard_weights(self):
         hard = self.get_hard_vectors()

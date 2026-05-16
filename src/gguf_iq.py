@@ -64,6 +64,8 @@ def gguf_name_to_hf_name(name: str) -> Optional[str]:
         "attn_k.weight": "self_attn.k_proj",
         "attn_v.weight": "self_attn.v_proj",
         "attn_output.weight": "self_attn.o_proj",
+        "attn_q_norm.weight": "self_attn.q_norm",
+        "attn_k_norm.weight": "self_attn.k_norm",
         "ffn_gate.weight": "mlp.gate_proj",
         "ffn_up.weight": "mlp.up_proj",
         "ffn_down.weight": "mlp.down_proj",
@@ -94,6 +96,8 @@ def hf_name_to_gguf_name(name: str) -> Optional[str]:
         "self_attn.k_proj": "attn_k.weight",
         "self_attn.v_proj": "attn_v.weight",
         "self_attn.o_proj": "attn_output.weight",
+        "self_attn.q_norm": "attn_q_norm.weight",
+        "self_attn.k_norm": "attn_k_norm.weight",
         "mlp.gate_proj": "ffn_gate.weight",
         "mlp.up_proj": "ffn_up.weight",
         "mlp.down_proj": "ffn_down.weight",
@@ -109,6 +113,12 @@ def hf_name_to_gguf_name(name: str) -> Optional[str]:
 def quant_type_name(tensor_type) -> Optional[str]:
     value = getattr(tensor_type, "value", tensor_type)
     return GGUF_TYPE_TO_NAME.get(int(value))
+
+
+def _as_numpy_indices(values, *, dtype=np.uint16) -> np.ndarray:
+    if isinstance(values, torch.Tensor):
+        values = values.detach().cpu().numpy()
+    return np.asarray(values, dtype=dtype)
 
 
 @dataclass(frozen=True)
@@ -252,12 +262,17 @@ class GGUFIQuantStore:
     are interleaved with 8D sign patterns.
     """
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, mode: str = "r"):
         import gguf
 
         self.path = str(Path(path).expanduser())
-        self.reader = gguf.GGUFReader(self.path)
+        self.reader = gguf.GGUFReader(self.path, mode=mode)
         self.tensors = {tensor.name: tensor for tensor in self.reader.tensors}
+
+    def flush(self) -> None:
+        flush = getattr(self.reader.data, "flush", None)
+        if flush is not None:
+            flush()
 
     def collect_refs(self, *, max_bits: float = 4.0) -> Dict[str, GGUFIQuantTensorRef]:
         refs: Dict[str, GGUFIQuantTensorRef] = {}
@@ -323,6 +338,47 @@ class GGUFIQuantStore:
             "Current exact path supports IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, and IQ3_S."
         )
 
+    def patch_tensor_indices(
+        self,
+        name: str,
+        *,
+        magnitude_indices=None,
+        sign_indices=None,
+        first_magnitude_indices=None,
+        second_magnitude_indices=None,
+    ) -> None:
+        """Patch assignment indices in an IQuant tensor while preserving fixed scales."""
+        tensor = self.get_tensor(name)
+        qtype_name = quant_type_name(tensor.tensor_type)
+        if qtype_name == "IQ2_XS":
+            if magnitude_indices is None or sign_indices is None:
+                raise ValueError("IQ2_XS patching needs magnitude_indices and sign_indices")
+            self._pack_iq2_xs(tensor, magnitude_indices, sign_indices)
+        elif qtype_name == "IQ2_S":
+            if magnitude_indices is None or sign_indices is None:
+                raise ValueError("IQ2_S patching needs magnitude_indices and sign_indices")
+            self._pack_iq2_s(tensor, magnitude_indices, sign_indices)
+        elif qtype_name == "IQ2_XXS":
+            if magnitude_indices is None or sign_indices is None:
+                raise ValueError("IQ2_XXS patching needs magnitude_indices and sign_indices")
+            self._pack_iq2_xxs(tensor, magnitude_indices, sign_indices)
+        elif qtype_name == "IQ3_XXS":
+            if first_magnitude_indices is None or second_magnitude_indices is None or sign_indices is None:
+                raise ValueError(
+                    "IQ3_XXS patching needs first_magnitude_indices, "
+                    "second_magnitude_indices, and sign_indices"
+                )
+            self._pack_iq3_xxs(tensor, first_magnitude_indices, second_magnitude_indices, sign_indices)
+        elif qtype_name == "IQ3_S":
+            if first_magnitude_indices is None or second_magnitude_indices is None or sign_indices is None:
+                raise ValueError(
+                    "IQ3_S patching needs first_magnitude_indices, "
+                    "second_magnitude_indices, and sign_indices"
+                )
+            self._pack_iq3_s(tensor, first_magnitude_indices, second_magnitude_indices, sign_indices)
+        else:
+            raise NotImplementedError(f"IQuant patching is not implemented for {qtype_name}")
+
     @staticmethod
     def _blocks(data: np.ndarray, type_size: int) -> tuple[int, int, np.ndarray]:
         rows = data.view(np.uint8)
@@ -333,6 +389,95 @@ class GGUFIQuantStore:
         blocks_per_row = flat_rows.shape[-1] // type_size
         blocks = flat_rows.reshape(rows_count * blocks_per_row, type_size)
         return rows_count, blocks_per_row, blocks
+
+    def _pack_iq2_xs(self, tensor, magnitude_indices, sign_indices) -> None:
+        rows, blocks_per_row, blocks = self._blocks(tensor.data, 74)
+        magnitude = _as_numpy_indices(magnitude_indices, dtype=np.uint16).reshape(rows, blocks_per_row, 32)
+        signs = _as_numpy_indices(sign_indices, dtype=np.uint16).reshape(rows, blocks_per_row, 32)
+
+        qs = (magnitude & np.uint16(0x01FF)) | ((signs & np.uint16(0x007F)) << np.uint16(9))
+        blocks[:, 2:66] = qs.astype("<u2", copy=False).reshape(-1, 32).view(np.uint8).reshape(-1, 64)
+
+    def _pack_iq2_s(self, tensor, magnitude_indices, sign_indices) -> None:
+        rows, blocks_per_row, blocks = self._blocks(tensor.data, 82)
+        magnitude = _as_numpy_indices(magnitude_indices, dtype=np.uint16).reshape(rows, blocks_per_row, 32)
+        signs = _as_numpy_indices(sign_indices, dtype=np.uint8).reshape(rows, blocks_per_row, 32)
+
+        blocks[:, 2:34] = (magnitude & np.uint16(0x00FF)).astype(np.uint8).reshape(-1, 32)
+        blocks[:, 34:66] = signs.reshape(-1, 32)
+
+        hi = ((magnitude >> np.uint16(8)) & np.uint16(0x0003)).astype(np.uint8)
+        hi = hi.reshape(rows, blocks_per_row, 8, 4)
+        qh = hi[..., 0] | (hi[..., 1] << 2) | (hi[..., 2] << 4) | (hi[..., 3] << 6)
+        blocks[:, 66:74] = qh.reshape(-1, 8)
+
+    def _pack_iq2_xxs(self, tensor, magnitude_indices, sign_indices) -> None:
+        rows, blocks_per_row, blocks = self._blocks(tensor.data, 66)
+        magnitude = _as_numpy_indices(magnitude_indices, dtype=np.uint8).reshape(rows, blocks_per_row, 8, 4)
+        signs = _as_numpy_indices(sign_indices, dtype=np.uint32).reshape(rows, blocks_per_row, 8, 4)
+
+        first_word = np.ascontiguousarray(magnitude).view("<u4").reshape(rows, blocks_per_row, 8)
+        old_qs = blocks[:, 2:66].copy().view("<u4").reshape(rows, blocks_per_row, 8, 2)
+        scale_nibble = old_qs[..., 1] & np.uint32(0xF0000000)
+        second_word = (
+            scale_nibble
+            | (signs[..., 0] & np.uint32(0x7F))
+            | ((signs[..., 1] & np.uint32(0x7F)) << np.uint32(7))
+            | ((signs[..., 2] & np.uint32(0x7F)) << np.uint32(14))
+            | ((signs[..., 3] & np.uint32(0x7F)) << np.uint32(21))
+        )
+        qs = np.empty((rows, blocks_per_row, 8, 2), dtype="<u4")
+        qs[..., 0] = first_word
+        qs[..., 1] = second_word
+        blocks[:, 2:66] = qs.reshape(-1, 16).view(np.uint8).reshape(-1, 64)
+
+    def _pack_iq3_xxs(self, tensor, first_magnitude_indices, second_magnitude_indices, sign_indices) -> None:
+        rows, blocks_per_row, blocks = self._blocks(tensor.data, 98)
+        first = _as_numpy_indices(first_magnitude_indices, dtype=np.uint8).reshape(rows, blocks_per_row, 8, 4)
+        second = _as_numpy_indices(second_magnitude_indices, dtype=np.uint8).reshape(rows, blocks_per_row, 8, 4)
+        signs = _as_numpy_indices(sign_indices, dtype=np.uint32).reshape(rows, blocks_per_row, 8, 4)
+
+        qs = np.empty((rows, blocks_per_row, 8, 4, 2), dtype=np.uint8)
+        qs[..., 0] = first
+        qs[..., 1] = second
+        blocks[:, 2:66] = qs.reshape(-1, 64)
+
+        old_scales = blocks[:, 66:98].copy().view("<u4").reshape(rows, blocks_per_row, 8)
+        scale_nibble = old_scales & np.uint32(0xF0000000)
+        new_scales = (
+            scale_nibble
+            | (signs[..., 0] & np.uint32(0x7F))
+            | ((signs[..., 1] & np.uint32(0x7F)) << np.uint32(7))
+            | ((signs[..., 2] & np.uint32(0x7F)) << np.uint32(14))
+            | ((signs[..., 3] & np.uint32(0x7F)) << np.uint32(21))
+        ).astype("<u4", copy=False)
+        blocks[:, 66:98] = new_scales.reshape(-1, 8).view(np.uint8).reshape(-1, 32)
+
+    def _pack_iq3_s(self, tensor, first_magnitude_indices, second_magnitude_indices, sign_indices) -> None:
+        rows, blocks_per_row, blocks = self._blocks(tensor.data, 110)
+        first = _as_numpy_indices(first_magnitude_indices, dtype=np.uint16).reshape(rows, blocks_per_row, 32)
+        second = _as_numpy_indices(second_magnitude_indices, dtype=np.uint16).reshape(rows, blocks_per_row, 32)
+        signs = _as_numpy_indices(sign_indices, dtype=np.uint8).reshape(rows, blocks_per_row, 32)
+
+        paired = np.empty((rows, blocks_per_row, 32, 2), dtype=np.uint16)
+        paired[..., 0] = first
+        paired[..., 1] = second
+        indices = paired.reshape(rows, blocks_per_row, 64)
+
+        blocks[:, 2:66] = (indices & np.uint16(0x00FF)).astype(np.uint8).reshape(-1, 64)
+        hi = ((indices >> np.uint16(8)) & np.uint16(0x0001)).astype(np.uint8).reshape(rows, blocks_per_row, 8, 8)
+        qh = (
+            hi[..., 0]
+            | (hi[..., 1] << 1)
+            | (hi[..., 2] << 2)
+            | (hi[..., 3] << 3)
+            | (hi[..., 4] << 4)
+            | (hi[..., 5] << 5)
+            | (hi[..., 6] << 6)
+            | (hi[..., 7] << 7)
+        )
+        blocks[:, 66:74] = qh.reshape(-1, 8)
+        blocks[:, 74:106] = signs.reshape(-1, 32)
 
     def _finish_decomposition(
         self,
