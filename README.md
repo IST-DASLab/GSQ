@@ -338,6 +338,78 @@ The assembled model is written to `checkpoint_dir/<run_id>/assembled/` and can b
 
 ---
 
+## Serve with Humming Kernels (optional)
+
+[Humming](https://github.com/inclusionAI/humming) is a MARLIN-based low-bit GEMM library that runs quantized Linear layers directly on packed integer codes, without dequantizing to fp16 first. GSQ ships a converter that takes an assembled `compressed-tensors` checkpoint and rewrites it into Humming's native on-disk layout, so each MLP Linear can be served by the Humming kernel instead of a dense matmul.
+
+### What the conversion changes
+
+| Layout      | `compressed-tensors` checkpoint                       | Humming checkpoint                                |
+|---|---|---|
+| Container   | `uint4` (used as storage for any 2 to 4 bit codes)     | Native `uint{2..8}`, packed at effective bits      |
+| Per-Linear  | `weight_packed`, `weight_scale`, `weight_shape`        | `weight`, `weight_scale`, `zero_point` (FP)        |
+| Inference   | dequantize -> bf16 matmul                              | direct packed-int GEMM via Humming kernel          |
+
+The converter infers the effective bit width per layer from the observed code range. A 2-bit GSQ run that GSQ stored in a `uint4` container (because `compressed-tensors` has no `uint2` pack format) is repacked into Humming's true `uint2` format, halving the packed-weight footprint on disk.
+
+### Install Humming
+
+The kernel package needs an `nvcc` binary plus matching CUDA headers and libs. The PyPI wheels split these across several packages and version-suffix conventions vary; the following sequence works against the venv created by `scripts/setup_env.sh`:
+
+```bash
+git clone https://github.com/inclusionAI/humming.git
+uv pip install -e ./humming
+uv pip install nvidia-cuda-nvcc           # ships nvcc binary under nvidia/cu13/bin
+
+CU_DIR=$(python -c "import nvidia, os; print(os.path.join(nvidia.__path__[0], 'cu13'))")
+export CUDA_HOME=$CU_DIR
+export PATH=$CUDA_HOME/bin:$PATH
+ln -sf libcudart.so.13 $CUDA_HOME/lib/libcudart.so
+```
+
+If NVRTC fails with parse errors in `cuda_fp8.hpp`, the cu13 include dir is being picked up alongside the cu12 headers torch ships. Hide it:
+```bash
+mv $CUDA_HOME/include $CUDA_HOME/_include_disabled
+```
+
+### Convert an assembled checkpoint
+
+```bash
+# 1. Assemble the compressed-tensors checkpoint as usual.
+python save_model.py --config configs/local/config.yaml \
+    --out-dir ./runtime/assembled-ct
+
+# 2. Rewrite it into Humming's layout.
+python convert_to_humming.py \
+    --in-dir  ./runtime/assembled-ct \
+    --out-dir ./runtime/assembled-humming \
+    --verify-one '.*\.layers\.0\.mlp\.gate_proj$'
+```
+
+`--verify-one <regex>` picks the first matching Linear, runs an actual Humming kernel forward, and compares it to the dequantized reference. Use it as a smoke test before kicking off the full conversion. Pass `--verify-only` to skip writing the output.
+
+The resulting `assembled-humming/` directory has a `config.json` with `quant_method: "humming"` and a per-layer `dynamic` regex map encoding the effective bits, plus safetensors shards in Humming's native layout. Layers can be loaded with `humming.layer.HummingLayer.from_safetensors(dir, prefix=<linear_name>)`.
+
+### Verify end-to-end
+
+`tests/eval_humming_model.py` loads the model twice (once with `compressed-tensors` decompression, once with the Humming kernel) and compares logits + perplexity:
+
+```bash
+python tests/eval_humming_model.py \
+    --ct-dir      ./runtime/assembled-ct \
+    --humming-dir ./runtime/assembled-humming \
+    --base-model  Qwen/Qwen3-0.6B \
+    --ppl-tokens  4096
+```
+
+Both pipelines compute the same quantized model via different code paths, so the perplexities should agree to within bf16 accumulation noise. On a Qwen3-0.6B 2-bit smoke run we measured `|delta_ppl| / ppl = 0.79%` (337.32 vs 339.99) with 91.7% top-1 token agreement on a 12-token logit comparison.
+
+### Bitwidth support
+
+The converter handles effective bit widths in `{2, 3, 4, 5, 6, 7, 8}`. GSQ today emits `1 / 2 / 3 / 4 / ternary` codes through `src/quantization/gumbel_quantizer_*.py`; the kernel side already supports the full `uint2..uint8` range, so adding `5..8` bit support is a training-side change (extending `GumbelQuantizerInt`'s codebook from 5 levels to `2**bits` levels). The serving converter needs no changes.
+
+---
+
 ## Benchmark Evaluation
 
 Evaluation uses [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) against a running vLLM server.
