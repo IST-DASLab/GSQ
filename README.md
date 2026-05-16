@@ -406,7 +406,7 @@ Both pipelines compute the same quantized model via different code paths, so the
 
 ### Bitwidth support
 
-The converter handles effective bit widths in `{2, 3, 4, 5, 6, 7, 8}`. GSQ today emits `1 / 2 / 3 / 4 / ternary` codes through `src/quantization/gumbel_quantizer_*.py`; the kernel side already supports the full `uint2..uint8` range, so adding `5..8` bit support is a training-side change (extending `GumbelQuantizerInt`'s codebook from 5 levels to `2**bits` levels). The serving converter needs no changes.
+The converter handles effective bit widths in `{2, 3, 4, 5, 6, 7, 8}`. GSQ today emits `2 / >2 / ternary` codes through `src/quantization/gumbel_quantizer_*.py`.
 
 ---
 
@@ -564,7 +564,7 @@ WikiText2 perplexity is evaluated every `ppl_eval_every_n_layers` layers (defaul
 ```bibtex
 @article{dadgarnia2026gsq,
   title  = {GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling},
-  author = {Dadgarnia, Alireza and Tabesh, Soroush and Nikdan, Mahdi and Helcig, Michael and Kurti{\'c}, Eldar and Alistarh, Dan},
+  author = {Dadgarnia, Alireza and Tabesh, Soroush and Nikdan, Mahdi and Helcig, Michael and Kurti{\'c}, Eldar and Kleinegger, Max and Alistarh, Dan},
   journal = {arXiv preprint arXiv:2604.18556},
   year   = {2026}
 }
