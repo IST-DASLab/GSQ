@@ -29,6 +29,7 @@ class DataConfig:
 @dataclass
 class QuantizationConfig:
     gsq_bits: Union[int, float, str] = 2
+    backend: str = "scalar"  # scalar | gsvq_iquant
     init_method: str = "gptq"
     gsq_enabled: bool = True
     start_layer: int = 0
@@ -39,6 +40,14 @@ class QuantizationConfig:
     groupsize: int = 128
     strength: float = 6
     logits_dtype: str = "bfloat16"
+    prequantized_gguf: str = ""
+    low_bit_max_bits: float = 4.0
+    gsvq_candidate_count: int = 16
+    gsvq_neighbor_candidates: int = 8
+    gsvq_target_candidates: int = 8
+    gsvq_rotation_trick: bool = False
+    gsvq_freeze_scales: bool = True
+    gsvq_enforce_error_decrease: bool = True
 
 
 @dataclass

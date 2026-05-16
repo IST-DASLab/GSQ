@@ -1,0 +1,55 @@
+{
+  "args": {
+    "candidate_count": 8,
+    "chunk_vectors": 8192,
+    "device": "cuda:6",
+    "gguf": "/home/dalistarh/.cache/huggingface/hub/models--unsloth--Qwen3-4B-GGUF/snapshots/22c9fc8a8c7700b76a1789366280a6a5a1ad1120/Qwen3-4B-UD-Q2_K_XL.gguf",
+    "grad_clip": 0.0,
+    "hf_model": "/home/dalistarh/.cache/huggingface/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c",
+    "layers": "0,7,14,35",
+    "lr": 0.1,
+    "max_bits": 4.0,
+    "max_tensors": 0,
+    "max_vectors_per_tensor": 8192,
+    "neighbor_candidates": 4,
+    "no_acceptance_guard": false,
+    "optimizer_name": "adamw",
+    "out": "runtime/gsvq_iquant_hparam/20260516-041814/search/hard_restart3_lr01",
+    "preset": "tuned",
+    "qtypes": "",
+    "restarts": 3,
+    "rotation_trick": false,
+    "scale_end": 40.0,
+    "scale_start": 1.0,
+    "seed": 0,
+    "std": 0.01,
+    "steps": 20,
+    "strength": 0.25,
+    "target_candidates": 4,
+    "temp_end": 0.1,
+    "temp_start": 1.5,
+    "weight_decay": 0.0
+  },
+  "num_tensors": 18,
+  "params": {
+    "candidate_count": 8,
+    "grad_clip": 0.0,
+    "logit_scale": [
+      1.0,
+      40.0
+    ],
+    "lr": 0.1,
+    "neighbor_candidates": 4,
+    "optimizer_name": "adamw",
+    "restarts": 3,
+    "std": 0.01,
+    "steps": 20,
+    "strength": 0.25,
+    "target_candidates": 4,
+    "temperature": [
+      1.5,
+      0.1
+    ],
+    "weight_decay": 0.0
+  }
+}

@@ -1,0 +1,105 @@
+GSVQ IQuant sweep: tensors=45 preset=tuned device=cuda:3
+[1/45] blk.0.attn_k.weight IQ3_XXS shape=(2560, 1024)
+  init=2.05760007e-05 accepted=2.04735712e-05 delta=1.02429476e-07 rel=0.498% chunks=3/3 time=2.0s
+[2/45] blk.0.attn_q.weight IQ3_XXS shape=(2560, 4096)
+  init=1.84959273e-05 accepted=1.83874840e-05 delta=1.08443237e-07 rel=0.586% chunks=10/10 time=1.3s
+[3/45] blk.0.ffn_gate.weight IQ3_S shape=(2560, 9728)
+  init=1.10163828e-05 accepted=1.05909763e-05 delta=4.25406583e-07 rel=3.862% chunks=24/24 time=3.2s
+[4/45] blk.0.ffn_up.weight IQ3_S shape=(2560, 9728)
+  init=9.53652671e-06 accepted=9.25078030e-06 delta=2.85746414e-07 rel=2.996% chunks=24/24 time=3.2s
+[5/45] blk.1.attn_k.weight IQ3_XXS shape=(2560, 1024)
+  init=1.87695514e-05 accepted=1.80914143e-05 delta=6.78137076e-07 rel=3.613% chunks=3/3 time=0.3s
+[6/45] blk.1.attn_q.weight IQ3_XXS shape=(2560, 4096)
+  init=1.72237023e-05 accepted=1.66525586e-05 delta=5.71143755e-07 rel=3.316% chunks=10/10 time=1.2s
+[7/45] blk.1.ffn_gate.weight IQ3_S shape=(2560, 9728)
+  init=1.05864599e-05 accepted=9.93143168e-06 delta=6.55028196e-07 rel=6.187% chunks=24/24 time=3.2s
+[8/45] blk.1.ffn_up.weight IQ3_S shape=(2560, 9728)
+  init=4.81329263e-06 accepted=4.71587643e-06 delta=9.74161998e-08 rel=2.024% chunks=20/24 time=3.1s
+[9/45] blk.6.attn_k.weight IQ3_XXS shape=(2560, 1024)
+  init=1.86464094e-05 accepted=1.81721822e-05 delta=4.74227272e-07 rel=2.543% chunks=3/3 time=0.3s
+[10/45] blk.6.attn_q.weight IQ3_XXS shape=(2560, 4096)
+  init=1.95944758e-05 accepted=1.91762656e-05 delta=4.18210220e-07 rel=2.134% chunks=10/10 time=1.3s
+[11/45] blk.6.ffn_gate.weight IQ3_S shape=(2560, 9728)
+  init=1.47996464e-05 accepted=1.43697891e-05 delta=4.29857296e-07 rel=2.905% chunks=24/24 time=3.2s
+[12/45] blk.6.ffn_up.weight IQ3_S shape=(2560, 9728)
+  init=9.55678005e-06 accepted=9.42923277e-06 delta=1.27547278e-07 rel=1.335% chunks=24/24 time=3.2s
+[13/45] blk.7.attn_k.weight IQ2_XS shape=(2560, 1024)
+  init=5.07169716e-05 accepted=4.98626898e-05 delta=8.54281825e-07 rel=1.684% chunks=3/3 time=0.3s
+[14/45] blk.7.attn_q.weight IQ2_XS shape=(2560, 4096)
+  init=4.97437715e-05 accepted=4.91781848e-05 delta=5.65586743e-07 rel=1.137% chunks=10/10 time=1.0s
+[15/45] blk.7.ffn_down.weight IQ3_S shape=(9728, 2560)
+  init=9.67710119e-06 accepted=9.51008011e-06 delta=1.67021081e-07 rel=1.726% chunks=24/24 time=3.2s
+[16/45] blk.7.ffn_gate.weight IQ2_S shape=(2560, 9728)
+  init=4.80901347e-05 accepted=4.78925144e-05 delta=1.97620217e-07 rel=0.411% chunks=24/24 time=2.6s
+[17/45] blk.7.ffn_up.weight IQ2_S shape=(2560, 9728)
+  init=3.19665355e-05 accepted=3.19432757e-05 delta=2.32597813e-08 rel=0.073% chunks=24/24 time=2.7s
+[18/45] blk.14.attn_k.weight IQ2_XS shape=(2560, 1024)
+  init=5.00002439e-05 accepted=4.97990230e-05 delta=2.01220973e-07 rel=0.402% chunks=3/3 time=0.2s
+[19/45] blk.14.attn_q.weight IQ2_XS shape=(2560, 4096)
+  init=5.02440758e-05 accepted=5.01289345e-05 delta=1.15141302e-07 rel=0.229% chunks=10/10 time=1.0s
+[20/45] blk.14.ffn_down.weight IQ3_S shape=(9728, 2560)
+  init=1.04058129e-05 accepted=1.02207626e-05 delta=1.85050282e-07 rel=1.778% chunks=24/24 time=3.2s
+[21/45] blk.14.ffn_gate.weight IQ2_S shape=(2560, 9728)
+  init=3.74512523e-05 accepted=3.73958723e-05 delta=5.53799940e-08 rel=0.148% chunks=24/24 time=2.6s
+[22/45] blk.14.ffn_up.weight IQ2_S shape=(2560, 9728)
+  init=3.53377700e-05 accepted=3.53247122e-05 delta=1.30577782e-08 rel=0.037% chunks=23/24 time=2.7s
+[23/45] blk.15.attn_k.weight IQ2_XS shape=(2560, 1024)
+  init=5.01093578e-05 accepted=4.97979025e-05 delta=3.11455369e-07 rel=0.622% chunks=3/3 time=0.3s
+[24/45] blk.15.attn_q.weight IQ2_XS shape=(2560, 4096)
+  init=5.20571921e-05 accepted=5.19554109e-05 delta=1.01781188e-07 rel=0.196% chunks=10/10 time=1.0s
+[25/45] blk.15.ffn_down.weight IQ3_S shape=(9728, 2560)
+  init=1.02953659e-05 accepted=1.01203081e-05 delta=1.75057769e-07 rel=1.700% chunks=24/24 time=3.2s
+[26/45] blk.15.ffn_gate.weight IQ2_S shape=(2560, 9728)
+  init=3.50640222e-05 accepted=3.50213359e-05 delta=4.26862818e-08 rel=0.122% chunks=24/24 time=2.7s
+[27/45] blk.15.ffn_up.weight IQ2_S shape=(2560, 9728)
+  init=3.46126078e-05 accepted=3.46006244e-05 delta=1.19833490e-08 rel=0.035% chunks=24/24 time=2.7s
+[28/45] blk.16.attn_k.weight IQ3_XXS shape=(2560, 1024)
+  init=1.76421341e-05 accepted=1.73102126e-05 delta=3.31921547e-07 rel=1.881% chunks=3/3 time=0.3s
+[29/45] blk.16.attn_q.weight IQ3_XXS shape=(2560, 4096)
+  init=1.83967311e-05 accepted=1.81121850e-05 delta=2.84546149e-07 rel=1.547% chunks=10/10 time=1.2s
+[30/45] blk.16.ffn_gate.weight IQ3_S shape=(2560, 9728)
+  init=1.11175008e-05 accepted=1.08645225e-05 delta=2.52978239e-07 rel=2.275% chunks=24/24 time=3.2s
+[31/45] blk.16.ffn_up.weight IQ3_S shape=(2560, 9728)
+  init=1.03148022e-05 accepted=1.01445498e-05 delta=1.70252411e-07 rel=1.651% chunks=24/24 time=3.1s
+[32/45] blk.17.attn_k.weight IQ2_XS shape=(2560, 1024)
+  init=4.42632409e-05 accepted=4.40652744e-05 delta=1.97966438e-07 rel=0.447% chunks=3/3 time=0.2s
+[33/45] blk.17.attn_q.weight IQ2_XS shape=(2560, 4096)
+  init=5.14860931e-05 accepted=5.14199568e-05 delta=6.61362719e-08 rel=0.128% chunks=10/10 time=0.9s
+[34/45] blk.17.ffn_down.weight IQ3_S shape=(9728, 2560)
+  init=1.00500331e-05 accepted=9.87351121e-06 delta=1.76521854e-07 rel=1.756% chunks=24/24 time=3.2s
+[35/45] blk.17.ffn_gate.weight IQ2_S shape=(2560, 9728)
+  init=3.57955828e-05 accepted=3.57586046e-05 delta=3.69782547e-08 rel=0.103% chunks=23/24 time=2.7s
+[36/45] blk.17.ffn_up.weight IQ2_S shape=(2560, 9728)
+  init=3.43636106e-05 accepted=3.43507156e-05 delta=1.28949882e-08 rel=0.038% chunks=21/24 time=2.6s
+[37/45] blk.18.attn_k.weight IQ2_XS shape=(2560, 1024)
+  init=4.53928355e-05 accepted=4.50890948e-05 delta=3.03740671e-07 rel=0.669% chunks=3/3 time=0.3s
+[38/45] blk.18.attn_q.weight IQ2_XS shape=(2560, 4096)
+  init=4.82007872e-05 accepted=4.81263814e-05 delta=7.44057616e-08 rel=0.154% chunks=10/10 time=0.9s
+[39/45] blk.18.ffn_down.weight IQ3_S shape=(9728, 2560)
+  init=1.00622779e-05 accepted=9.89039974e-06 delta=1.71878128e-07 rel=1.708% chunks=24/24 time=3.1s
+[40/45] blk.18.ffn_gate.weight IQ2_S shape=(2560, 9728)
+  init=3.50936695e-05 accepted=3.50714168e-05 delta=2.22526356e-08 rel=0.063% chunks=24/24 time=2.6s
+[41/45] blk.18.ffn_up.weight IQ2_S shape=(2560, 9728)
+  init=3.43724797e-05 accepted=3.43597255e-05 delta=1.27541410e-08 rel=0.037% chunks=24/24 time=2.6s
+[42/45] blk.35.attn_k.weight IQ3_XXS shape=(2560, 1024)
+  init=1.59791627e-05 accepted=1.59217030e-05 delta=5.74596925e-08 rel=0.360% chunks=3/3 time=0.3s
+[43/45] blk.35.attn_q.weight IQ3_XXS shape=(2560, 4096)
+  init=1.72438712e-05 accepted=1.71888402e-05 delta=5.50309778e-08 rel=0.319% chunks=10/10 time=1.2s
+[44/45] blk.35.ffn_gate.weight IQ3_S shape=(2560, 9728)
+  init=1.24927946e-05 accepted=1.21430526e-05 delta=3.49741975e-07 rel=2.800% chunks=24/24 time=3.2s
+[45/45] blk.35.ffn_up.weight IQ3_S shape=(2560, 9728)
+  init=1.30075324e-05 accepted=1.26642808e-05 delta=3.43251610e-07 rel=2.639% chunks=24/24 time=3.1s
+
+Per-layer accepted reconstruction MSE reduction:
+layer=0 tensors=4 1.20755146e-05->1.17716748e-05 delta=3.03839829e-07 rel=2.516%
+layer=1 tensors=4 9.74841706e-06->9.32712815e-06 delta=4.21288911e-07 rel=4.322%
+layer=6 tensors=4 1.36837652e-05->1.33736647e-05 delta=3.10100484e-07 rel=2.266%
+layer=7 tensors=5 3.29003846e-05->3.26973492e-05 delta=2.03035494e-07 rel=0.617%
+layer=14 tensors=5 3.10844024e-05->3.09927629e-05 delta=9.16394834e-08 rel=0.295%
+layer=15 tensors=5 3.03902115e-05->3.03036148e-05 delta=8.65967290e-08 rel=0.285%
+layer=16 tensors=4 1.22848307e-05->1.20560475e-05 delta=2.28783222e-07 rel=1.862%
+layer=17 tensors=5 3.02147840e-05->3.01367761e-05 delta=7.80079090e-08 rel=0.258%
+layer=18 tensors=5 2.96631654e-05->2.95865454e-05 delta=7.66200092e-08 rel=0.258%
+layer=35 tensors=4 1.36336564e-05->1.33477805e-05 delta=2.85875944e-07 rel=2.097%
+
+Wrote results to runtime/gsvq_iquant_hparam/20260516-041814/full/hard_lr05_steps50_c4/20260516-042450_tuned

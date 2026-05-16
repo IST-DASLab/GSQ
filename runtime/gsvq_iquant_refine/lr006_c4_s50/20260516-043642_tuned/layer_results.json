@@ -1,0 +1,54 @@
+[
+  {
+    "accepted_abs_delta": 6.915952326380648e-07,
+    "accepted_mse": 1.3545998172048712e-05,
+    "accepted_rel_delta": 0.048575290288203,
+    "elapsed_sec": 1.743147850036621,
+    "elements": 262144,
+    "initial_mse": 1.4237593404686777e-05,
+    "layer": 0,
+    "raw_abs_delta": 6.915952326380648e-07,
+    "raw_best_mse": 1.3545998172048712e-05,
+    "raw_rel_delta": 0.048575290288203,
+    "tensors": 4
+  },
+  {
+    "accepted_abs_delta": 6.602163921343176e-07,
+    "accepted_mse": 4.0085144064505585e-05,
+    "accepted_rel_delta": 0.016203474082329,
+    "elapsed_sec": 0.3391764163970947,
+    "elements": 327680,
+    "initial_mse": 4.07453604566399e-05,
+    "layer": 7,
+    "raw_abs_delta": 6.602163921343176e-07,
+    "raw_best_mse": 4.0085144064505585e-05,
+    "raw_rel_delta": 0.016203474082329,
+    "tensors": 5
+  },
+  {
+    "accepted_abs_delta": 4.2218489397782426e-07,
+    "accepted_mse": 4.368841218820308e-05,
+    "accepted_rel_delta": 0.009571053712813419,
+    "elapsed_sec": 0.3950791358947754,
+    "elements": 327680,
+    "initial_mse": 4.41105970821809e-05,
+    "layer": 14,
+    "raw_abs_delta": 4.2218489397782426e-07,
+    "raw_best_mse": 4.368841218820308e-05,
+    "raw_rel_delta": 0.009571053712813419,
+    "tensors": 5
+  },
+  {
+    "accepted_abs_delta": 2.3962525119713973e-07,
+    "accepted_mse": 1.2830534387830994e-05,
+    "accepted_rel_delta": 0.01833376621365871,
+    "elapsed_sec": 0.2811160087585449,
+    "elements": 262144,
+    "initial_mse": 1.3070159639028134e-05,
+    "layer": 35,
+    "raw_abs_delta": 2.3962525119713973e-07,
+    "raw_best_mse": 1.2830534387830994e-05,
+    "raw_rel_delta": 0.01833376621365871,
+    "tensors": 4
+  }
+]

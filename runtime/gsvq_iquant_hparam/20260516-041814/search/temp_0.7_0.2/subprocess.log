@@ -1,0 +1,45 @@
+GSVQ IQuant sweep: tensors=18 preset=tuned device=cuda:3
+[1/18] blk.0.attn_k.weight IQ3_XXS shape=(2560, 1024)
+  init=1.93522264e-05 accepted=1.93134620e-05 delta=3.87644832e-08 rel=0.200% chunks=1/1 time=1.3s
+[2/18] blk.0.attn_q.weight IQ3_XXS shape=(2560, 4096)
+  init=9.71712871e-06 accepted=9.71603549e-06 delta=1.09321263e-09 rel=0.011% chunks=1/1 time=0.0s
+[3/18] blk.0.ffn_gate.weight IQ3_S shape=(2560, 9728)
+  init=1.72211221e-05 accepted=1.65834008e-05 delta=6.37721314e-07 rel=3.703% chunks=1/1 time=0.0s
+[4/18] blk.0.ffn_up.weight IQ3_S shape=(2560, 9728)
+  init=1.06598964e-05 accepted=1.03966649e-05 delta=2.63231414e-07 rel=2.469% chunks=1/1 time=0.0s
+[5/18] blk.7.attn_k.weight IQ2_XS shape=(2560, 1024)
+  init=4.81951356e-05 accepted=4.77808644e-05 delta=4.14271199e-07 rel=0.860% chunks=1/1 time=0.0s
+[6/18] blk.7.attn_q.weight IQ2_XS shape=(2560, 4096)
+  init=5.55055485e-05 accepted=5.51424455e-05 delta=3.63103027e-07 rel=0.654% chunks=1/1 time=0.0s
+[7/18] blk.7.ffn_down.weight IQ3_S shape=(9728, 2560)
+  init=1.24313920e-05 accepted=1.24313920e-05 delta=0.00000000e+00 rel=0.000% chunks=0/1 time=0.0s
+[8/18] blk.7.ffn_gate.weight IQ2_S shape=(2560, 9728)
+  init=4.93316620e-05 accepted=4.87074904e-05 delta=6.24171662e-07 rel=1.265% chunks=1/1 time=0.0s
+[9/18] blk.7.ffn_up.weight IQ2_S shape=(2560, 9728)
+  init=3.82630642e-05 accepted=3.81291538e-05 delta=1.33910362e-07 rel=0.350% chunks=1/1 time=0.0s
+[10/18] blk.14.attn_k.weight IQ2_XS shape=(2560, 1024)
+  init=5.66479684e-05 accepted=5.64333168e-05 delta=2.14651664e-07 rel=0.379% chunks=1/1 time=0.0s
+[11/18] blk.14.attn_q.weight IQ2_XS shape=(2560, 4096)
+  init=4.18440286e-05 accepted=4.17913470e-05 delta=5.26815711e-08 rel=0.126% chunks=1/1 time=0.0s
+[12/18] blk.14.ffn_down.weight IQ3_S shape=(9728, 2560)
+  init=2.29003235e-05 accepted=2.29003235e-05 delta=0.00000000e+00 rel=0.000% chunks=0/1 time=0.0s
+[13/18] blk.14.ffn_gate.weight IQ2_S shape=(2560, 9728)
+  init=6.35963297e-05 accepted=6.34542375e-05 delta=1.42092176e-07 rel=0.223% chunks=1/1 time=0.0s
+[14/18] blk.14.ffn_up.weight IQ2_S shape=(2560, 9728)
+  init=3.55643351e-05 accepted=3.54759941e-05 delta=8.83410394e-08 rel=0.248% chunks=1/1 time=0.0s
+[15/18] blk.35.attn_k.weight IQ3_XXS shape=(2560, 1024)
+  init=1.59844913e-05 accepted=1.59844913e-05 delta=0.00000000e+00 rel=0.000% chunks=0/1 time=0.0s
+[16/18] blk.35.attn_q.weight IQ3_XXS shape=(2560, 4096)
+  init=1.83727916e-05 accepted=1.83645898e-05 delta=8.20182322e-09 rel=0.045% chunks=1/1 time=0.0s
+[17/18] blk.35.ffn_gate.weight IQ3_S shape=(2560, 9728)
+  init=8.89753574e-06 accepted=8.81103097e-06 delta=8.65047696e-08 rel=0.972% chunks=1/1 time=0.0s
+[18/18] blk.35.ffn_up.weight IQ3_S shape=(2560, 9728)
+  init=9.02581996e-06 accepted=9.01784460e-06 delta=7.97535904e-09 rel=0.088% chunks=1/1 time=0.1s
+
+Per-layer accepted reconstruction MSE reduction:
+layer=0 tensors=4 1.42375934e-05->1.40023908e-05 delta=2.35202606e-07 rel=1.652%
+layer=7 tensors=5 4.07453605e-05->4.04382692e-05 delta=3.07091250e-07 rel=0.754%
+layer=14 tensors=5 4.41105971e-05->4.40110438e-05 delta=9.95532901e-08 rel=0.226%
+layer=35 tensors=4 1.30701596e-05->1.30444892e-05 delta=2.56704880e-08 rel=0.196%
+
+Wrote results to runtime/gsvq_iquant_hparam/20260516-041814/search/temp_0.7_0.2/20260516-042143_tuned

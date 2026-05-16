@@ -59,6 +59,15 @@ class QuantizationTrainer:
 
     def setup_layer_training(self, tensor_name, Q, scales):
         quantizer = self._create_quantizer(Q, scales)
+        self.setup_quantizer_training(tensor_name, quantizer)
+
+    def setup_quantizer_training(self, tensor_name, quantizer):
+        """Register a ready-made quantizer.
+
+        Scalar GSQ still calls this via setup_layer_training(Q, scales). GSVQ
+        uses it directly after decomposing an IQuant tensor into fixed scales
+        plus discrete VQ assignment logits.
+        """
 
         if self.use_dist and not self.model.is_moe:
             for p in quantizer.parameters():
@@ -67,12 +76,21 @@ class QuantizationTrainer:
         self.quantizers[tensor_name] = quantizer
 
         logit_params = [p for n, p in quantizer.named_parameters() if n != 'scales']
-        self.optimizer_params.extend([
-            {'params': logit_params, 'lr': self.config.training.lr1,
-            'weight_decay': self.config.training.weight_decay, 'lr_decay_tag': True},
-            {'params': quantizer.scales, 'lr': self.config.training.lr2,
-            'weight_decay': 0.0, 'lr_decay_tag': True}
-        ])
+        if logit_params:
+            self.optimizer_params.append({
+                'params': logit_params,
+                'lr': self.config.training.lr1,
+                'weight_decay': self.config.training.weight_decay,
+                'lr_decay_tag': True,
+            })
+        scale_param = getattr(quantizer, "scales", None)
+        if isinstance(scale_param, nn.Parameter):
+            self.optimizer_params.append({
+                'params': scale_param,
+                'lr': self.config.training.lr2,
+                'weight_decay': 0.0,
+                'lr_decay_tag': True,
+            })
         
     def train_layer(self, layer_name, train_all, val_all, logging,
                     layer_idx=None, num_layers=None):
