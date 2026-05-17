@@ -83,6 +83,7 @@ def ct_to_humming(
     symmetric: bool = True,
     target_dtype: torch.dtype = torch.bfloat16,
     force_bits: int | None = None,
+    symmetric_out: bool = False,
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any], Dict[str, Any]]:
     """Convert one GSQ-style CT bundle into Humming layout.
 
@@ -98,6 +99,14 @@ def ct_to_humming(
         target_dtype:  dtype to store scales / FP zero-points as
                        (bf16 or fp16).
         force_bits:    if set, override the inferred effective bits.
+        symmetric_out: if True, emit no `zero_point` tensor. The kernel applies
+                       an implicit `2**(eff_bits-1)` offset (offset-binary
+                       symmetric). Only valid when the GSQ codebook spans the
+                       full unsigned range `[0, 2**eff_bits)` so the implicit
+                       offset matches what we'd otherwise store as a constant
+                       FP zero-point. The function asserts this; pass
+                       `symmetric_out=False` (the default, lossless FP zp path)
+                       if you are unsure.
 
     Returns:
         tensors:       {'weight', 'weight_scale', 'zero_point'} ready to feed
@@ -138,6 +147,25 @@ def ct_to_humming(
     qweight_hum_u32 = (decoded - code_min).to(torch.int32).contiguous()
     zero_fp_value = float(ct_offset - code_min)
 
+    if symmetric_out:
+        # Offset-binary symmetric: humming's kernel implicitly subtracts
+        # 2**(eff_bits-1) from the unsigned code. For that to be equivalent
+        # to (code_ct - ct_offset) * scale, the shifted code (code_ct - code_min)
+        # must equal (code_ct - ct_offset) + 2**(eff_bits-1), i.e.,
+        # ct_offset - code_min == 2**(eff_bits-1). Assert it explicitly so a
+        # codebook that doesn't fill the full negative range doesn't silently
+        # produce wrong values.
+        expected_zp = 1 << (eff_bits - 1)
+        if int(zero_fp_value) != expected_zp or zero_fp_value != float(expected_zp):
+            raise ValueError(
+                f"symmetric_out=True requires the codebook to span the full "
+                f"unsigned range so the implicit kernel offset matches. "
+                f"Got effective zero-point {zero_fp_value} but symmetric mode "
+                f"requires {expected_zp} (= 2**(eff_bits-1) with eff_bits={eff_bits}). "
+                f"Drop --symmetric or rerun with force_bits matching the actual "
+                f"codebook span."
+            )
+
     if qweight_hum_u32.numel() % HUMMING_TILE != 0:
         raise ValueError(
             f"humming pack_weight requires nelement divisible by 1024; got "
@@ -147,25 +175,26 @@ def ct_to_humming(
     packed_weight = ops.pack_weight(qweight_hum_u32.cuda(), eff_bits).cpu()
 
     scales_t = weight_scale.to(target_dtype).cpu().contiguous()
-    zero_t = torch.full_like(scales_t, zero_fp_value, dtype=target_dtype)
 
-    tensors = {
+    tensors: Dict[str, torch.Tensor] = {
         "weight": packed_weight,
         "weight_scale": scales_t,
-        "zero_point": zero_t,
     }
     schema_config: Dict[str, Any] = {
         "quant_method": "humming",
         "dtype": f"uint{eff_bits}",
         "group_size": int(group_size),
-        "has_zero_point": True,
-        "is_fp_zero_point": True,
+        "has_zero_point": not symmetric_out,
+        "is_fp_zero_point": not symmetric_out,
     }
+    if not symmetric_out:
+        tensors["zero_point"] = torch.full_like(scales_t, zero_fp_value, dtype=target_dtype)
     info: Dict[str, Any] = {
         "N": N,
         "K": K,
         "storage_bits": int(storage_bits),
         "effective_bits": int(eff_bits),
+        "symmetric_out": bool(symmetric_out),
         "code_min": code_min,
         "code_max": code_max,
         "ct_offset": int(ct_offset),

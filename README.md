@@ -354,22 +354,26 @@ The converter infers the effective bit width per layer from the observed code ra
 
 ### Install Humming
 
-The kernel package needs an `nvcc` binary plus matching CUDA headers and libs. The PyPI wheels split these across several packages and version-suffix conventions vary; the following sequence works against the venv created by `scripts/setup_env.sh`:
+`humming-kernels` is on PyPI and ships `[cu12]` and `[cu13]` extras that pull the matching CUDA wheels (nvcc, nvrtc, runtime, cccl) for the kernel JIT. Pick the extra that matches your torch wheel: GSQ's `scripts/setup_env.sh` defaults to `TORCH_CUDA=cu130`, so use `[cu13]`. If you overrode it to `cu128` or similar, use `[cu12]`.
 
 ```bash
-git clone https://github.com/inclusionAI/humming.git
-uv pip install -e ./humming
-uv pip install nvidia-cuda-nvcc           # ships nvcc binary under nvidia/cu13/bin
+uv pip install "humming-kernels[cu13]"        # or [cu12] for torch on CUDA 12.x
+```
 
+If `humming.ops.humming_gemm` later fails inside `torch.utils.cpp_extension.load(...)` because `CUDA_HOME` is unset, point it at the nvcc bundle that came with the extra and add a `libcudart.so` symlink (the cu13 wheels ship only `libcudart.so.13`):
+
+```bash
 CU_DIR=$(python -c "import nvidia, os; print(os.path.join(nvidia.__path__[0], 'cu13'))")
 export CUDA_HOME=$CU_DIR
 export PATH=$CUDA_HOME/bin:$PATH
 ln -sf libcudart.so.13 $CUDA_HOME/lib/libcudart.so
 ```
 
-If NVRTC fails with parse errors in `cuda_fp8.hpp`, the cu13 include dir is being picked up alongside the cu12 headers torch ships. Hide it:
+If you previously installed `humming-kernels` without the extra (or installed the source tree directly), uninstall and reinstall with the extra so the right CUDA deps land in the env:
+
 ```bash
-mv $CUDA_HOME/include $CUDA_HOME/_include_disabled
+uv pip uninstall humming-kernels
+uv pip install "humming-kernels[cu13]"
 ```
 
 ### Convert an assembled checkpoint
@@ -387,6 +391,8 @@ python convert_to_humming.py \
 ```
 
 `--verify-one <regex>` picks the first matching Linear, runs an actual Humming kernel forward, and compares it to the dequantized reference. Use it as a smoke test before kicking off the full conversion. Pass `--verify-only` to skip writing the output.
+
+Pass `--symmetric` to emit Humming's offset-binary symmetric format: no per-layer `zero_point` tensor on disk, the kernel applies an implicit `2^(eff_bits-1)` offset instead. This is bit-identical to the default FP-zero-point path for all current GSQ codebooks (2/3/4-bit Gumbel quantizers span the full unsigned range), and trims a few MB off the checkpoint (3.94 MB on the Qwen3-0.6B 2-bit smoke run). The converter asserts the codebook-spans-full-range invariant before omitting the zero_point.
 
 The resulting `assembled-humming/` directory has a `config.json` with `quant_method: "humming"` and a per-layer `dynamic` regex map encoding the effective bits, plus safetensors shards in Humming's native layout. Layers can be loaded with `humming.layer.HummingLayer.from_safetensors(dir, prefix=<linear_name>)`.
 

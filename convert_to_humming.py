@@ -137,11 +137,12 @@ def convert_layer(
     group_size: int,
     symmetric: bool,
     target_dtype: torch.dtype,
+    symmetric_out: bool = False,
 ):
     return ct_to_humming(
         weight_packed, weight_scale, weight_shape,
         storage_bits=storage_bits, group_size=group_size, symmetric=symmetric,
-        target_dtype=target_dtype,
+        target_dtype=target_dtype, symmetric_out=symmetric_out,
     )
 
 
@@ -153,6 +154,7 @@ def write_humming_checkpoint(
     group_size: int,
     symmetric: bool,
     target_dtype: torch.dtype,
+    symmetric_out: bool = False,
 ):
     """Rewrite the checkpoint: for each quantized Linear emit Humming tensors;
     copy all other tensors through unchanged. Preserves shard partitioning."""
@@ -186,7 +188,7 @@ def write_humming_checkpoint(
             tensors, cfg, info = convert_layer(
                 wp, ws, wsh,
                 storage_bits=storage_bits, group_size=group_size, symmetric=symmetric,
-                target_dtype=target_dtype,
+                target_dtype=target_dtype, symmetric_out=symmetric_out,
             )
         except Exception as e:
             raise RuntimeError(f"failed to convert {prefix}: {e}") from e
@@ -203,11 +205,13 @@ def write_humming_checkpoint(
             key = f"{prefix}.{suf}"
             src_shard = Path(shard_map[suf][1]).name
             quant_keys_drop_per_shard.setdefault(src_shard, set()).add(key)
-        # Add the three Humming keys into target_shard.
+        # Add the Humming keys into target_shard. zero_point is omitted in
+        # symmetric_out mode.
         adds = quant_keys_add_per_shard.setdefault(target_shard_name, {})
         adds[f"{prefix}.weight"] = tensors["weight"]
         adds[f"{prefix}.weight_scale"] = tensors["weight_scale"]
-        adds[f"{prefix}.zero_point"] = tensors["zero_point"]
+        if "zero_point" in tensors:
+            adds[f"{prefix}.zero_point"] = tensors["zero_point"]
 
         if i % 20 == 0 or i == progress_total:
             dt = time.perf_counter() - t0
@@ -289,11 +293,11 @@ def write_humming_checkpoint(
                 "weights": {
                     "dtype": f"uint{most_common_bits}",
                     "group_size": group_size,
-                    "has_zero_point": True,
-                    "is_fp_zero_point": True,
+                    "has_zero_point": not symmetric_out,
+                    "is_fp_zero_point": not symmetric_out,
                     "num_bits": most_common_bits,
                     "strategy": "group",
-                    "symmetric": False,  # Humming has an FP zero-point, so asym.
+                    "symmetric": bool(symmetric_out),
                     "type": "int",
                 },
             }
@@ -319,6 +323,7 @@ def verify_one(
     group_size: int,
     symmetric: bool,
     target_dtype: torch.dtype,
+    symmetric_out: bool = False,
 ):
     """Pick the first Linear matching `pattern`, convert it, run a kernel
     forward, and compare to the CT-dequant matmul reference."""
@@ -328,7 +333,7 @@ def verify_one(
         raise SystemExit(f"no layer matched verify-one pattern {pattern!r}; "
                          f"first few layers: {sorted(layer_map)[:5]}")
     name = matches[0]
-    print(f"verifying {name}")
+    print(f"verifying {name}  (symmetric_out={symmetric_out})")
     wp, ws, wsh = load_layer_tensors(layer_map[name])
     ref = ct_dequantize_reference(
         wp, ws, wsh, storage_bits=storage_bits, group_size=group_size,
@@ -337,7 +342,7 @@ def verify_one(
     tensors, cfg, info = ct_to_humming(
         wp, ws, wsh,
         storage_bits=storage_bits, group_size=group_size, symmetric=symmetric,
-        target_dtype=target_dtype,
+        target_dtype=target_dtype, symmetric_out=symmetric_out,
     )
     print(f"  info: {info}")
     print(f"  schema: {cfg}")
@@ -384,6 +389,11 @@ def parse_args():
                    help="Regex; verify the first matching Linear by running a kernel forward "
                         "pass and comparing to the dequant reference.")
     p.add_argument("--target-dtype", default="bfloat16", choices=["bfloat16", "float16"])
+    p.add_argument("--symmetric", action="store_true",
+                   help="Emit Humming's offset-binary symmetric format: no per-layer "
+                        "zero_point tensor; the kernel applies an implicit "
+                        "2^(eff_bits-1) offset. Requires the GSQ codebook to span the "
+                        "full unsigned range (true for current 2/3/4-bit Gumbel quantizers).")
     return p.parse_args()
 
 
@@ -405,7 +415,7 @@ def main():
     if args.verify_one:
         verify_one(layer_map, args.verify_one,
                    storage_bits=storage_bits, group_size=group_size, symmetric=symmetric,
-                   target_dtype=target_dtype)
+                   target_dtype=target_dtype, symmetric_out=args.symmetric)
 
     if args.verify_only:
         return
@@ -416,7 +426,7 @@ def main():
     write_humming_checkpoint(
         in_dir, out_dir, layer_map,
         storage_bits=storage_bits, group_size=group_size, symmetric=symmetric,
-        target_dtype=target_dtype,
+        target_dtype=target_dtype, symmetric_out=args.symmetric,
     )
 
 
