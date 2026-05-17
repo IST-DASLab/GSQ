@@ -13,6 +13,60 @@ from lion_pytorch import Lion
 DEBUG = False 
 
 
+def _ternary_quantizer_kwargs(config):
+    return {
+        "mask_mode": getattr(config.quantization, "ternary_mask_mode", "standard"),
+        "density": getattr(config.quantization, "ternary_density", 0.5),
+        "density_scope": getattr(config.quantization, "ternary_density_scope", "row"),
+        "density_eps": getattr(config.quantization, "ternary_density_eps", 1e-6),
+    }
+
+
+def _binary_quantizer_kwargs(config):
+    return {
+        "binary_mode": getattr(config.quantization, "binary_mode", "standard"),
+        "aln_eps": getattr(config.quantization, "binary_aln_eps", 1e-6),
+    }
+
+
+def _is_binary_gsq(gsq_bits):
+    return gsq_bits == 1 or str(gsq_bits).lower() in ("1", "binary")
+
+
+def _logit_optimizer_param_groups(quantizer, config, lr_decay_tag=False):
+    no_weight_decay_names = set(getattr(quantizer, "no_weight_decay_param_names", ()))
+    decay_params = []
+    no_decay_params = []
+    for name, param in quantizer.named_parameters():
+        if name == "scales":
+            continue
+        if name in no_weight_decay_names:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    groups = []
+    if decay_params:
+        group = {
+            "params": decay_params,
+            "lr": config.training.lr1,
+            "weight_decay": config.training.weight_decay,
+        }
+        if lr_decay_tag:
+            group["lr_decay_tag"] = True
+        groups.append(group)
+    if no_decay_params:
+        group = {
+            "params": no_decay_params,
+            "lr": config.training.lr1,
+            "weight_decay": 0.0,
+        }
+        if lr_decay_tag:
+            group["lr_decay_tag"] = True
+        groups.append(group)
+    return groups
+
+
 def rtn_quantize(layer, config, device, dtype):
     W = layer.weight.data.clone().float()
     rows, columns = W.shape
@@ -24,6 +78,20 @@ def rtn_quantize(layer, config, device, dtype):
     n_groups = (columns + groupsize - 1) // groupsize if groupsize > 0 else 1
     group_scales = torch.zeros(rows, n_groups, device=W.device, dtype=W.dtype)
     Q = torch.zeros_like(W)
+
+    if _is_binary_gsq(config.quantization.gsq_bits):
+        for g in range(n_groups):
+            c_start = g * groupsize
+            c_end = min(c_start + groupsize, columns)
+            W_group = W[:, c_start:c_end]
+            scale = W_group.abs().mean(dim=1).clamp_min(torch.finfo(W.dtype).eps)
+            group_scales[:, g] = scale
+            Q[:, c_start:c_end] = torch.where(
+                W_group >= 0,
+                scale.unsqueeze(1),
+                -scale.unsqueeze(1),
+            )
+        return Q.to(device), group_scales.to(device)
 
     quantizer = Quantizer()
     quantizer.configure(wbits, perchannel=True, sym=sym, mse=True, trits=trits)
@@ -232,31 +300,53 @@ class GPTQ:
                 logging.info(f'Layer {self.name}: GPTQ Loss = {self.last_gptq_loss}')
 
         if "q_proj" in self.name or "k_proj" in self.name or "in_proj_qkv" in self.name or gsq_bits in ("ternary", "1.58", 1.58):
-            if gsq_bits == 1:
-                quantizer = GumbelQuantizer1Bit(Q, group_scales, groupsize, self.config.quantization.std, self.config.quantization.strength, self.device, self.dtype)
+            if _is_binary_gsq(gsq_bits):
+                quantizer = GumbelQuantizer1Bit(
+                    Q,
+                    group_scales,
+                    groupsize,
+                    self.config.quantization.std,
+                    self.config.quantization.strength,
+                    self.device,
+                    self.dtype,
+                    logits_dtype=torch.float32,
+                    **_binary_quantizer_kwargs(self.config),
+                )
             elif gsq_bits == 2:
                 quantizer = GumbelQuantizer2Bit(Q, group_scales, groupsize, self.config.quantization.std, self.config.quantization.strength, self.device, self.dtype, logits_dtype=torch.float32)
             elif gsq_bits in ("ternary", "1.58", 1.58):
-                quantizer = GumbelQuantizerTernary(torch.zeros_like(W), group_scales, groupsize, self.config.quantization.std, 0, self.device, self.dtype, logits_dtype=torch.float32)
+                quantizer = GumbelQuantizerTernary(
+                    torch.zeros_like(W),
+                    group_scales,
+                    groupsize,
+                    self.config.quantization.std,
+                    0,
+                    self.device,
+                    self.dtype,
+                    logits_dtype=torch.float32,
+                    **_ternary_quantizer_kwargs(self.config),
+                )
             elif gsq_bits in [3, 4]:
                 quantizer = GumbelQuantizerInt(Q, group_scales, groupsize, self.config.quantization.std, self.config.quantization.strength, self.device, self.dtype, logits_dtype=torch.float32)
             else:
                 raise ValueError(
                     f"Unsupported gsq_bits={gsq_bits!r}. "
-                    f"Supported: 1, 2, 3, 4, 'ternary' (aliases: '1.58')"
+                    f"Supported: 1 (alias: 'binary'), 2, 3, 4, 'ternary' (aliases: '1.58')"
                 )
 
             optimizer_params = []
 
-            logit_params = [p for n, p in quantizer.named_parameters() if n != 'scales']
-            optimizer_params.extend([
-                {'params': logit_params, 'lr': self.training.lr1,
-                'weight_decay': self.config.training.weight_decay},
-                {'params': quantizer.scales, 'lr': self.training.lr2,
-                'weight_decay': 0.0}
-            ])
+            optimizer_params.extend(
+                _logit_optimizer_param_groups(quantizer, self.config) + [
+                    {
+                        'params': quantizer.scales,
+                        'lr': self.config.training.lr2,
+                        'weight_decay': 0.0,
+                    }
+                ]
+            )
 
-            optimizer = Lion(optimizer_params, betas=self.config.training.lion_betas)
+            optimizer = Lion(optimizer_params, betas=tuple(self.config.training.lion_betas))
             num_epochs = 2000
 
             initial_temperature, final_temperature = self.config.quantization.temperature

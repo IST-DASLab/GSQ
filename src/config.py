@@ -39,6 +39,12 @@ class QuantizationConfig:
     groupsize: int = 128
     strength: float = 6
     logits_dtype: str = "bfloat16"
+    binary_mode: str = "standard"
+    binary_aln_eps: float = 1e-6
+    ternary_mask_mode: str = "standard"
+    ternary_density: float = 0.5
+    ternary_density_scope: str = "row"
+    ternary_density_eps: float = 1e-6
 
 
 @dataclass

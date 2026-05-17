@@ -71,9 +71,23 @@ The GSQ precision is controlled by the `quantization.gsq_bits` config key:
 
 | `gsq_bits`    | Quantizer Class          | Bits/weight | Codebook                     | Description                                          |
 |---|---|---|---|---|
+| `1` / `"binary"` | `GumbelQuantizer1Bit` | 1-bit       | `{-1, +1}` × scale           | Binary sign logits or local ALN sign scores with learned per-group scale |
 | `2` (default) | `GumbelQuantizer2Bit`    | 2-bit       | `{-2, -1, 0, 1}` × scale     | 4-level integer with learned per-group scale         |
 | `> 2`         | `GumbelQuantizerInt`     | n-bit       | `(init + {-2, -1, 0, 1, -2})` × scale     | 5-level integer with learned per-group scale         |
 | `"ternary"`   | `GumbelQuantizerTernary` | ~1.58-bit   | `{-1, 0, +1}` × scale        | Separate sign and mask logits with learned scale     |
+
+Ternary GSQ defaults to the standard dense mask relaxation. To force an exact
+nonzero density in the final ternary mask, set
+`quantization.ternary_mask_mode: "fixed_density"` and choose a
+`ternary_density_scope` of `"row"`, `"group"`, or `"tensor"`. Fixed-density
+ternary uses ALN-normalized mask scores for the nonzero mask and disables weight
+decay on those ALN scores; sign logits and scales still use the normal GSQ path.
+
+Binary GSQ defaults to the standard one-logit Gumbel-Sigmoid relaxation. For
+local ALN binary experiments, set `quantization.binary_mode` to `"aln"` for
+ALN probabilities with normal Gumbel-Softmax backward, or `"aln_st"` for the
+ALN-backward straight-through surrogate. These modes use two local scores per
+weight over `{-1, +1}` and disable weight decay on those ALN scores.
 
 ---
 
@@ -190,10 +204,16 @@ The knobs that meaningfully change a run:
 
 | Key                                | Values / default                                | Effect                                                        |
 |---|---|---|
-| `quantization.gsq_bits`            | `1` / `2` (default) / `3` / `4` / `"ternary"`               | Selects the GSQ quantizer / target precision                  |
+| `quantization.gsq_bits`            | `1` / `"binary"` / `2` (default) / `3` / `4` / `"ternary"`  | Selects the GSQ quantizer / target precision                  |
 | `quantization.init_method`         | `"gptq"` (default) / `"rtn"`                    | Initialization before GSQ refinement                          |
 | `quantization.gsq_enabled`         | `true` (default) / `false`                      | `false` = init-only run (baseline; tagged `gptq+nogsq`)        |
 | `quantization.logits_dtype`        | `"bfloat16"` (default) / `"float32"`            | Precision of `sign_logits`, `mask_logits`, `quant_logits`     |
+| `quantization.binary_mode`         | `"standard"` (default) / `"aln"` / `"aln_st"`   | Selects standard binary GSQ or local ALN binary sign scores    |
+| `quantization.binary_aln_eps`      | `1e-6`                                          | Probability floor for local ALN binary sign sampling           |
+| `quantization.ternary_mask_mode`   | `"standard"` (default) / `"fixed_density"`      | Enables ALN fixed-density ternary masks for `gsq_bits: "ternary"` |
+| `quantization.ternary_density`     | `0.5`                                           | Target nonzero fraction for fixed-density ternary              |
+| `quantization.ternary_density_scope` | `"row"` (default) / `"group"` / `"tensor"`    | Scope in which fixed-density ternary applies exact TopK hardening |
+| `quantization.ternary_density_eps` | `1e-6`                                          | Probability floor/ceiling epsilon for ALN mask sampling        |
 | `quantization.groupsize`           | `128`                                           | Per-group quantization granularity                            |
 | `quantization.temperature`         | `[2.0, 0.05]`                                   | Gumbel temperature schedule (high → low)                      |
 | `quantization.scale`               | `[100, 500]`                                    | Gumbel logit scale schedule (low → high)                      |
@@ -240,7 +260,7 @@ data:
   val_samples: 128
 
 quantization:
-  gsq_bits: 2                     # GSQ precision: 1, 2, or "ternary"
+  gsq_bits: 2                     # GSQ precision: 1/"binary", 2, 3, 4, or "ternary"
   init_method: "gptq"             # "gptq" or "rtn"
   gsq_enabled: true               # false = init-only (no Gumbel refinement)
   start_layer: 0
@@ -251,6 +271,12 @@ quantization:
   groupsize: 128
   strength: 6
   logits_dtype: "bfloat16"        # "bfloat16" (default) or "float32"
+  binary_mode: "standard"         # "standard", "aln", or "aln_st"
+  binary_aln_eps: 1.0e-6
+  ternary_mask_mode: "standard"   # "standard" or "fixed_density"
+  ternary_density: 0.5            # only used by fixed_density ternary
+  ternary_density_scope: "row"    # "row", "group", or "tensor"
+  ternary_density_eps: 1.0e-6
 
 training:
   num_epochs: 10

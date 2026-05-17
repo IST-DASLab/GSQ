@@ -10,6 +10,11 @@ import torch.distributed as dist
 from src.quantization import *
 from src.utils.progress_reporter import report_gumbel_epoch, report_gumbel_step, report_pipeline
 
+
+def _is_binary_gsq(gsq_bits):
+    return gsq_bits == 1 or str(gsq_bits).lower() in ("1", "binary")
+
+
 class QuantizationTrainer:
     def __init__(self, model, config, dtype, self_attn=False):
         self.model = model
@@ -36,6 +41,12 @@ class QuantizationTrainer:
         groupsize = self.config.quantization.groupsize
         std = self.config.quantization.std
         strength = self.config.quantization.strength
+        binary_mode = getattr(self.config.quantization, 'binary_mode', 'standard')
+        binary_aln_eps = getattr(self.config.quantization, 'binary_aln_eps', 1e-6)
+        ternary_mask_mode = getattr(self.config.quantization, 'ternary_mask_mode', 'standard')
+        ternary_density = getattr(self.config.quantization, 'ternary_density', 0.5)
+        ternary_density_scope = getattr(self.config.quantization, 'ternary_density_scope', 'row')
+        ternary_density_eps = getattr(self.config.quantization, 'ternary_density_eps', 1e-6)
 
         logits_dtype_str = getattr(self.config.quantization, 'logits_dtype', None)
         if logits_dtype_str == "float32":
@@ -43,19 +54,72 @@ class QuantizationTrainer:
         else:
             logits_dtype = self.dtype
 
-        if gsq_bits == 1:
-            return GumbelQuantizer1Bit(Q, scales, groupsize, std, strength, self.device, self.dtype, logits_dtype)
+        if _is_binary_gsq(gsq_bits):
+            return GumbelQuantizer1Bit(
+                Q,
+                scales,
+                groupsize,
+                std,
+                strength,
+                self.device,
+                self.dtype,
+                logits_dtype,
+                binary_mode=binary_mode,
+                aln_eps=binary_aln_eps,
+            )
         elif gsq_bits == 2:
             return GumbelQuantizer2Bit(Q, scales, groupsize, std, strength, self.device, self.dtype, logits_dtype)
         elif gsq_bits in [3, 4]:
             return GumbelQuantizerInt(Q, scales, groupsize, std, strength, self.device, self.dtype, logits_dtype, bits=gsq_bits)
         elif gsq_bits in ("ternary", "1.58", 1.58):
-            return GumbelQuantizerTernary(Q, scales, groupsize, std, strength, self.device, self.dtype, logits_dtype)
+            return GumbelQuantizerTernary(
+                Q,
+                scales,
+                groupsize,
+                std,
+                strength,
+                self.device,
+                self.dtype,
+                logits_dtype,
+                mask_mode=ternary_mask_mode,
+                density=ternary_density,
+                density_scope=ternary_density_scope,
+                density_eps=ternary_density_eps,
+            )
         else:
             raise ValueError(
                 f"Unsupported gsq_bits={gsq_bits!r}. "
-                f"Supported: 1, 2, 3, 4, 'ternary' (aliases: '1.58')"
+                f"Supported: 1 (alias: 'binary'), 2, 3, 4, 'ternary' (aliases: '1.58')"
             )
+
+    def _logit_optimizer_param_groups(self, quantizer):
+        no_weight_decay_names = set(getattr(quantizer, "no_weight_decay_param_names", ()))
+        decay_params = []
+        no_decay_params = []
+        for name, param in quantizer.named_parameters():
+            if name == "scales":
+                continue
+            if name in no_weight_decay_names:
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+
+        groups = []
+        if decay_params:
+            groups.append({
+                'params': decay_params,
+                'lr': self.config.training.lr1,
+                'weight_decay': self.config.training.weight_decay,
+                'lr_decay_tag': True,
+            })
+        if no_decay_params:
+            groups.append({
+                'params': no_decay_params,
+                'lr': self.config.training.lr1,
+                'weight_decay': 0.0,
+                'lr_decay_tag': True,
+            })
+        return groups
 
     def setup_layer_training(self, tensor_name, Q, scales):
         quantizer = self._create_quantizer(Q, scales)
@@ -66,13 +130,16 @@ class QuantizationTrainer:
 
         self.quantizers[tensor_name] = quantizer
 
-        logit_params = [p for n, p in quantizer.named_parameters() if n != 'scales']
-        self.optimizer_params.extend([
-            {'params': logit_params, 'lr': self.config.training.lr1,
-            'weight_decay': self.config.training.weight_decay, 'lr_decay_tag': True},
-            {'params': quantizer.scales, 'lr': self.config.training.lr2,
-            'weight_decay': 0.0, 'lr_decay_tag': True}
-        ])
+        self.optimizer_params.extend(
+            self._logit_optimizer_param_groups(quantizer) + [
+                {
+                    'params': quantizer.scales,
+                    'lr': self.config.training.lr2,
+                    'weight_decay': 0.0,
+                    'lr_decay_tag': True,
+                }
+            ]
+        )
         
     def train_layer(self, layer_name, train_all, val_all, logging,
                     layer_idx=None, num_layers=None):

@@ -3,6 +3,9 @@ import torch.nn as nn
 
 
 def quantize(x, scale, zero, maxq):
+    if maxq == -2:
+        scale = scale.abs()
+        return torch.where(x >= 0, scale, -scale)
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
     q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
@@ -36,6 +39,8 @@ class Quantizer(nn.Module):
         self.maxshrink = maxshrink
         if trits:
             self.maxq = torch.tensor(-1)
+        elif bits == 1 and sym:
+            self.maxq = torch.tensor(-2)
 
     def find_params(self, x, weight=False):
         dev = x.device
@@ -68,6 +73,35 @@ class Quantizer(nn.Module):
         tmp = (xmin == 0) & (xmax == 0)
         xmin[tmp] = -1
         xmax[tmp] = +1
+
+        if self.maxq == -2:
+            scale = x.abs().mean(dim=1)
+            scale[scale == 0] = 1
+            self.scale = scale
+            self.zero = torch.zeros_like(self.scale)
+            if not self.perchannel:
+                if weight:
+                    tmp = shape[0]
+                else:
+                    tmp = shape[1] if len(shape) != 3 else shape[2]
+                self.scale = self.scale.repeat(tmp)
+                self.zero = self.zero.repeat(tmp)
+
+            if weight:
+                shape = [-1] + [1] * (len(shape) - 1)
+                self.scale = self.scale.reshape(shape)
+                self.zero = self.zero.reshape(shape)
+                return
+            if len(shape) == 4:
+                self.scale = self.scale.reshape((1, -1, 1, 1))
+                self.zero = self.zero.reshape((1, -1, 1, 1))
+            if len(shape) == 3:
+                self.scale = self.scale.reshape((1, 1, -1))
+                self.zero = self.zero.reshape((1, 1, -1))
+            if len(shape) == 2:
+                self.scale = self.scale.unsqueeze(0)
+                self.zero = self.zero.unsqueeze(0)
+            return
 
         if self.maxq < 0:
             self.scale = xmax
