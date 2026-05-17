@@ -1,3 +1,9 @@
+"""Binary ALN hyperparameter sweep on real transformer layers.
+
+This script compares standard binary GSQ, ALN from the GPTQ initializer, and
+ALN used only as a final phase after a standard GSQ warmup.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -65,6 +71,9 @@ def build_quantizer(q_init, scales, groupsize, cfg):
 
 
 def build_aln_from_standard(standard_quantizer, q_init, groupsize, mode):
+    # Handoff standard GSQ signs to ALN scores. The confidence comes from the
+    # learned sign-logit magnitude, so low-confidence signs remain easier for
+    # the ALN final phase to flip.
     hard, scales = standard_quantizer.get_hard_weights()
     q = GumbelQuantizer1Bit(
         hard.detach().to(torch.bfloat16),

@@ -1,3 +1,10 @@
+"""Small real-layer reconstruction benchmark for binary and ternary GSQ.
+
+The script captures activations from selected linear layers, runs GPTQ
+initialization, and compares held-out hard-weight reconstruction error for
+standard GSQ and the new ALN ablations.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -193,6 +200,9 @@ def find_ternary_scales(w_group, grid=50):
 
 
 def run_compatible_ternary_gptq(layer, x_train, groupsize):
+    # The repository's legacy trits path can produce magnitudes that are not
+    # directly representable by the ternary GSQ quantizer. This local GPTQ pass
+    # keeps the initializer on the shared {-s, 0, +s} grid.
     cfg = build_config(2, groupsize, trits=True)
     gptq = GPTQ(layer, "bench_linear", cfg, torch.device("cuda"), torch.float32)
     for start in range(0, x_train.shape[0], 128):

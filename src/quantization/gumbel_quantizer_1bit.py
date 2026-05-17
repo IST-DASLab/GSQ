@@ -1,3 +1,11 @@
+"""Binary GSQ quantizers.
+
+This module contains the standard one-logit binary GSQ path and two ALN
+ablation modes. The ALN modes keep the binary grid fixed at {-scale, +scale},
+but replace the sign logit with a local two-candidate absolute-score
+parameterization.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,18 +33,24 @@ def _canonical_binary_mode(mode):
 
 
 def _aln_binary_probabilities(sign_scores, eps):
+    # ALN uses absolute scores as local simplex mass, so multiplying all scores
+    # by a constant does not change the forward probability.
     abs_scores = sign_scores.float().abs() + eps
     z = abs_scores.sum(dim=0, keepdim=True).clamp_min(eps)
     return abs_scores / z
 
 
 def _aln_binary_score_backward(grad_prob, sign_scores, prob, eps):
+    # Advantage-style ALN gradient: each sign candidate is compared with the
+    # current probability-weighted average utility for that weight coordinate.
     abs_sum = (sign_scores.float().abs() + eps).sum(dim=0, keepdim=True).clamp_min(eps)
     baseline = (prob * grad_prob).sum(dim=0, keepdim=True)
     return torch.sign(sign_scores.float()) / abs_sum * (grad_prob - baseline)
 
 
 class GumbelQuantizer1Bit(nn.Module):
+    """One-bit GSQ with standard and ALN sign-assignment variants."""
+
     def __init__(
         self,
         Q,
@@ -70,6 +84,9 @@ class GumbelQuantizer1Bit(nn.Module):
             self.sign_logits = nn.Parameter(sign_logits.to(self.logits_dtype).detach())
             self.no_weight_decay_param_names = ()
         else:
+            # Store separate absolute scores for {-1, +1}. Weight decay is
+            # disabled for these scores because ALN probabilities are
+            # scale-invariant but their gradient magnitude is not.
             neg_prior = (sign_prior < 0).to(Q.dtype)
             pos_prior = (sign_prior >= 0).to(Q.dtype)
             sign_scores = torch.stack(
@@ -128,6 +145,8 @@ class GumbelQuantizer1Bit(nn.Module):
 
 
 class GumbelBinarySignFunction(torch.autograd.Function):
+    """Binary Concrete relaxation for the standard one-logit GSQ path."""
+
     @staticmethod
     def forward(ctx, sign_logits, scales, idx, temperature, scale, device, dtype):
         ctx.save_for_backward(sign_logits, scales)
@@ -179,6 +198,13 @@ class GumbelBinarySignFunction(torch.autograd.Function):
 
 
 class ALNBinarySignFunction(torch.autograd.Function):
+    """Gumbel-Softmax over ALN sign probabilities.
+
+    ``aln`` differentiates through the sampled softmax probabilities, while
+    ``aln_st`` uses the biased ALN-backward surrogate over the same forward
+    sample.
+    """
+
     @staticmethod
     def forward(ctx, sign_scores, scales, idx, straight_through, aln_eps, temperature, scale, device, dtype):
         del scale
@@ -223,6 +249,8 @@ class ALNBinarySignFunction(torch.autograd.Function):
         values = torch.tensor([-1.0, 1.0], dtype=torch.float32, device=sign_scores.device).view(2, 1, 1)
         grad_y = grad_soft_sign.unsqueeze(0) * values
         if ctx.straight_through:
+            # Straight-through ALN-backward: forward uses the sampled
+            # Gumbel-Softmax value, but backward treats y as the local simplex.
             grad_prob = grad_y
         else:
             dot = (grad_y * soft_sign_prob).sum(dim=0, keepdim=True)

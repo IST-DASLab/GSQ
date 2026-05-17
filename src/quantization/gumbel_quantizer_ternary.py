@@ -1,3 +1,10 @@
+"""Ternary GSQ quantizer variants.
+
+The standard mode keeps GSQ's independent Gumbel-Sigmoid mask and sign
+relaxations. The fixed-density mode replaces only the nonzero mask with an ALN
+budget inside a chosen scope, then hardens with exact TopK nonzeros.
+"""
+
 import math
 
 import torch
@@ -31,6 +38,8 @@ def _validate_density(density):
 
 
 def _aln_components(mask_scores, idx, density, scope, eps):
+    # Build p_i = K * |t_i| / sum |t| for the selected density scope. The
+    # returned ``k`` and ``z`` are shaped to make the backward formula local.
     scores = mask_scores.float()
     abs_scores = scores.abs() + eps
     sign_scores = torch.sign(scores)
@@ -70,6 +79,8 @@ def _aln_components(mask_scores, idx, density, scope, eps):
 def _aln_probabilities(mask_scores, idx, density, scope, eps):
     p_raw, _, _, _, _ = _aln_components(mask_scores, idx, density, scope, eps)
     p_clipped = p_raw.clamp(eps, 1.0 - eps)
+    # Straight-through clipping keeps Bernoulli logits finite without changing
+    # the unclipped ALN gradient inside the valid region.
     return p_raw + (p_clipped - p_raw).detach()
 
 
@@ -96,6 +107,8 @@ def _aln_score_backward(grad_p, mask_scores, idx, density, scope, eps):
 
 
 def _topk_mask(mask_scores, idx, density, scope):
+    # Hard fixed-density ternary uses exact TopK within the same scope used by
+    # the relaxed ALN mask. This is intentionally not used by dense ternary GSQ.
     scores = mask_scores.abs()
     rows, columns = scores.shape
     hard_mask = torch.zeros_like(scores, dtype=torch.bool)
@@ -136,6 +149,8 @@ def _topk_mask(mask_scores, idx, density, scope):
 
 
 class GumbelQuantizerTernary(nn.Module):
+    """Ternary GSQ with optional fixed-density ALN nonzero masks."""
+
     def __init__(
         self,
         Q,
@@ -177,6 +192,8 @@ class GumbelQuantizerTernary(nn.Module):
         normalized_abs_q = (Q / scale_per_col).abs()
 
         if self.mask_mode == _FIXED_DENSITY_MASK_MODE:
+            # Initialize fixed-density scores from the compatible ternary
+            # magnitude so TopK hardening starts near the GPTQ mask.
             mask_logits = std * (
                 1.0 + normalized_abs_q * strength + 0.01 * torch.randn_like(Q)
             )
@@ -239,6 +256,8 @@ class GumbelQuantizerTernary(nn.Module):
 
 
 class GumbelSoftmaxFunction(torch.autograd.Function):
+    """Standard ternary GSQ binary Concrete relaxations for mask and sign."""
+
     @staticmethod
     def forward(ctx, sign_logits, mask_logits, scales, idx, temperature, scale, device, dtype):
         ctx.save_for_backward(sign_logits, mask_logits, scales)
@@ -297,6 +316,8 @@ class GumbelSoftmaxFunction(torch.autograd.Function):
 
 
 class FixedDensityTernaryFunction(torch.autograd.Function):
+    """Fixed-density ternary mask with ALN score gradients."""
+
     @staticmethod
     def forward(
         ctx,
@@ -373,6 +394,8 @@ class FixedDensityTernaryFunction(torch.autograd.Function):
             / ctx.temperature
             / (mask_prob * (1.0 - mask_prob)).clamp_min(ctx.density_eps)
         )
+        # Map probability gradients back to absolute ALN scores using the
+        # scope-local advantage formula from the fixed-budget parameterization.
         grad_mask_scores = _aln_score_backward(
             grad_p,
             mask_scores,
