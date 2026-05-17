@@ -3,7 +3,10 @@ import torch.nn as nn
 
 
 def quantize(x, scale, zero, maxq):
-    if maxq < 0:
+    if maxq == -2:
+        scale = scale.abs()
+        return torch.where(x >= 0, scale, -scale)
+    if maxq == -1:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
     q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
     return scale * (q - zero)
@@ -36,6 +39,8 @@ class Quantizer(nn.Module):
         self.maxshrink = maxshrink
         if trits:
             self.maxq = torch.tensor(-1)
+        elif bits == 1 and sym:
+            self.maxq = torch.tensor(-2)
 
     def find_params(self, x, weight=False):
         dev = x.device
@@ -69,7 +74,11 @@ class Quantizer(nn.Module):
         xmin[tmp] = -1
         xmax[tmp] = +1
 
-        if self.maxq < 0:
+        if self.maxq == -2:
+            self.scale = x.abs().mean(dim=1)
+            self.scale[self.scale == 0] = 1
+            self.zero = torch.zeros_like(self.scale)
+        elif self.maxq == -1:
             self.scale = xmax
             self.zero = xmin
         else:
@@ -83,22 +92,64 @@ class Quantizer(nn.Module):
             best = torch.full([x.shape[0]], float("inf"), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
-                xmin1 = p * xmin
-                xmax1 = p * xmax
-                scale1 = (xmax1 - xmin1) / self.maxq
-                zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
-                q_pos = quantize(x,  scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
-                q_neg = quantize(x, (-scale1).unsqueeze(1), zero1.unsqueeze(1), self.maxq)
-                e_pos = (q_pos - x).abs().pow(self.norm).sum(1)
-                e_neg = (q_neg - x).abs().pow(self.norm).sum(1)
-                use_neg = e_neg < e_pos
-                err = torch.where(use_neg, e_neg, e_pos)
-                chosen_scale = torch.where(use_neg, -scale1, scale1)
-                tmp = err < best
-                if torch.any(tmp):
-                    best[tmp] = err[tmp]
-                    self.scale[tmp] = chosen_scale[tmp]
-                    self.zero[tmp] = zero1[tmp]
+                if self.maxq == -2:
+                    scale1 = p * x.abs().mean(dim=1)
+                    scale1[scale1 == 0] = 1
+                    zero1 = torch.zeros_like(scale1)
+                    q = quantize(
+                        x,
+                        scale1.unsqueeze(1),
+                        zero1.unsqueeze(1),
+                        self.maxq,
+                        self.format,
+                    )
+                    err = (q - x).abs().pow(self.norm).sum(1)
+                    tmp = err < best
+                    if torch.any(tmp):
+                        best[tmp] = err[tmp]
+                        self.scale[tmp] = scale1[tmp]
+                        self.zero[tmp] = zero1[tmp]
+                elif self.maxq == -1:
+                    xmin1 = p * xmin
+                    xmax1 = p * xmax
+                    scale1 = xmax1
+                    zero1 = xmin1
+                    q = quantize(
+                        x,
+                        scale1.unsqueeze(1),
+                        zero1.unsqueeze(1),
+                        self.maxq,
+                        self.format,
+                    )
+                    err = (q - x).abs().pow(self.norm).sum(1)
+
+                    tmp = err < best
+                    if torch.any(tmp):
+                        best[tmp] = err[tmp]
+                        self.scale[tmp] = scale1[tmp]
+                        self.zero[tmp] = zero1[tmp]
+                else:
+                    xmin1 = p * xmin
+                    xmax1 = p * xmax
+                    scale1 = (xmax1 - xmin1) / self.maxq
+                    zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
+
+                    q_pos = quantize(x,  scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq, self.format)
+                    q_neg = quantize(x, (-scale1).unsqueeze(1), zero1.unsqueeze(1), self.maxq, self.format)
+
+                    e_pos = (q_pos - x).abs().pow(self.norm).sum(1)
+                    e_neg = (q_neg - x).abs().pow(self.norm).sum(1)
+
+                    use_neg = e_neg < e_pos
+                    err = torch.where(use_neg, e_neg, e_pos)
+                    chosen_scale = torch.where(use_neg, -scale1, scale1)
+
+                    tmp = err < best
+                    if torch.any(tmp):
+                        best[tmp] = err[tmp]
+                        self.scale[tmp] = chosen_scale[tmp]
+                        self.zero[tmp] = zero1[tmp]
+                
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
