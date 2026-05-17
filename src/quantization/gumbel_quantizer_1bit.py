@@ -83,7 +83,7 @@ class GumbelSoftmaxFunction(torch.autograd.Function):
         grad_soft_quant = grad_output * scale_per_col
         grad_scale_per_col = grad_output * soft_sign
 
-        grad_quant_logits = grad_soft_quant * (1.0 - soft_sign.pow(2)) * (2.0 * scale / temperature)
+        grad_quant_logits = grad_soft_quant * (1.0 - soft_sign.pow(2)) * scale / temperature
 
         grad_scales = torch.zeros_like(scales)
         idx_expanded = idx.unsqueeze(0).expand(grad_scales.size(0), -1)
