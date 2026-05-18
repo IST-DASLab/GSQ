@@ -69,6 +69,53 @@ if [[ ! -d "${MODEL_PATH}" ]]; then
 fi
 [[ -z "${EVAL_OUTPUT_DIR}" ]] && EVAL_OUTPUT_DIR="${MODEL_PATH}/evals"
 
+# vLLM's compressed-tensors WNA16 fused-MoE Marlin kernel requires
+# (moe_intermediate_size / TP) % max(64, group_size) == 0 and
+# group_size in {-1, 32, 64, 128} (marlin_utils.py:check_moe_marlin_supports_layer).
+# If the check fails it silently falls back to a Triton WNA16 path that
+# either crashes inside moe_sum during profile_run (sm_89) or races on the
+# shared Triton cache on beegfs. See knowledge/05-vllm-tp-marlin-moe-shape-constraint.md
+# Clamp TP_SIZE to the largest divisor of itself that satisfies the constraint.
+TP_CLAMPED=$(MODEL_PATH="${MODEL_PATH}" TP_SIZE="${TP_SIZE}" python - <<'PY'
+import json, os, sys
+mp = os.environ["MODEL_PATH"]
+tp = int(os.environ["TP_SIZE"])
+try:
+    with open(os.path.join(mp, "config.json")) as f:
+        cfg = json.load(f)
+except Exception:
+    print(tp); sys.exit(0)
+mis = cfg.get("moe_intermediate_size")
+if not mis:
+    print(tp); sys.exit(0)
+gs = 128
+qc = cfg.get("quantization_config") or {}
+for g in (qc.get("config_groups") or {}).values():
+    w = (g or {}).get("weights") or {}
+    if isinstance(w.get("group_size"), int) and w["group_size"] > 0:
+        gs = w["group_size"]; break
+if gs not in (-1, 32, 64, 128):
+    print(tp); sys.exit(0)
+need = max(64, gs)
+best = tp
+while best > 1:
+    if mis % best == 0 and (mis // best) % need == 0:
+        break
+    best -= 1
+print(best)
+PY
+)
+if [[ -n "${TP_CLAMPED}" && "${TP_CLAMPED}" != "${TP_SIZE}" ]]; then
+    echo "[gsq-serve] WARNING: clamping TP_SIZE ${TP_SIZE} -> ${TP_CLAMPED} so that" >&2
+    echo "            (moe_intermediate_size / TP) % max(64, group_size) == 0" >&2
+    echo "            (vLLM Marlin WNA16 MoE shape constraint; see" >&2
+    echo "            research_logs/knowledge/05-vllm-tp-marlin-moe-shape-constraint.md)" >&2
+    echo "            Set TP_SIZE_FORCE=1 to skip this clamp." >&2
+    if [[ "${TP_SIZE_FORCE:-0}" != "1" ]]; then
+        TP_SIZE="${TP_CLAMPED}"
+    fi
+fi
+
 # Resolve WANDB_RUN_ID (so eval can resume the same WandB run). Same dual-root,
 # pipefail-safe lookup as MODEL_PATH above. ${SCRATCH} may legitimately point
 # outside the repo (user-controlled), in which case the find on a non-existent
@@ -109,6 +156,40 @@ echo "URL        : http://${HOST}:${PORT}"
 echo "  health   : http://${HOST}:${PORT}/health"
 echo "  v1       : http://${HOST}:${PORT}/v1/completions"
 echo "=========================================="
+
+# Hopper / Ampere advisory check.
+# vLLM's compressed-tensors WNA16 fused MoE has no Marlin kernel on Ada
+# (sm_89, L40 / L40S / RTX 4090) and falls back to a Triton path that has
+# crashed during profile_run on our setup. See
+# research_logs/knowledge/04-hopper-ampere-required-for-serve.md
+# Warn loudly but do NOT abort: dense / non-WNA16 cases may still work,
+# and the kernel coverage is expected to improve in newer vLLM tags.
+python - <<'PY' || true
+import sys
+try:
+    import torch
+except Exception as e:
+    print(f"[gsq-serve] torch import failed during sm-cap probe: {e}", file=sys.stderr)
+    sys.exit(0)
+if not torch.cuda.is_available():
+    sys.exit(0)
+caps = {torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())}
+names = {torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())}
+bad = {c for c in caps if c[0] < 8 or c == (8, 9)}
+if bad:
+    print("=" * 70, file=sys.stderr)
+    print("[gsq-serve] WARNING: GSQ has only been tested with vLLM on Hopper", file=sys.stderr)
+    print("            (sm_90, H100). Detected GPUs with compute capabilities", file=sys.stderr)
+    print(f"            {sorted(caps)} on devices {sorted(names)}.", file=sys.stderr)
+    if (8, 9) in bad:
+        print("            sm_89 (Ada, L40 / L40S / RTX 4090) is known-broken for", file=sys.stderr)
+        print("            compressed-tensors WNA16 fused MoE in vLLM 0.20.x:", file=sys.stderr)
+        print("            it falls back from Marlin to a Triton path that", file=sys.stderr)
+        print("            crashes inside moe_sum during profile_run.", file=sys.stderr)
+    print("            See research_logs/knowledge/04-hopper-ampere-required-for-serve.md", file=sys.stderr)
+    print("            Proceeding anyway (warn-only).", file=sys.stderr)
+    print("=" * 70, file=sys.stderr)
+PY
 
 cd "${REPO_ROOT}"
 
