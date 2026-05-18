@@ -156,8 +156,11 @@ def write_humming_checkpoint(
     target_dtype: torch.dtype,
     symmetric_out: bool = False,
 ):
-    """Rewrite the checkpoint: for each quantized Linear emit Humming tensors;
-    copy all other tensors through unchanged. Preserves shard partitioning."""
+    """Rewrite the checkpoint streaming, one input shard at a time. Peak RSS
+    stays bounded by the largest single shard, not the whole model -- so this
+    scales to Kimi-K2.5 (~32 GB packed) on a workstation."""
+    import gc
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Load original index.
@@ -173,76 +176,93 @@ def write_humming_checkpoint(
     for k, shard in wmap_orig.items():
         by_shard.setdefault(shard, []).append(k)
 
-    # For each quantized prefix, derive which Humming keys replace which CT keys.
-    # Humming keys are written into whichever shard held the CT weight_packed.
-    quant_keys_drop_per_shard: Dict[str, set] = {}
-    quant_keys_add_per_shard: Dict[str, Dict[str, torch.Tensor]] = {}
+    # Assert per-Linear colocation: all three CT suffixes for a prefix sit in
+    # the same shard (true for GSQ save_model.py output, which writes one shard
+    # per transformer layer). Streaming-per-shard relies on this.
+    shard_of_prefix: Dict[str, str] = {}
+    for prefix, sm in layer_map.items():
+        shards = {Path(sm[s][1]).name for s in CT_SUFFIXES}
+        if len(shards) != 1:
+            raise NotImplementedError(
+                f"prefix {prefix!r} has CT tensors split across {shards}; "
+                f"streaming converter requires colocation. Re-run save_model.py "
+                f"or fall back to a non-streaming converter."
+            )
+        shard_of_prefix[prefix] = shards.pop()
+
+    prefixes_in_shard: Dict[str, List[str]] = {}
+    for p, sh in shard_of_prefix.items():
+        prefixes_in_shard.setdefault(sh, []).append(p)
+
     per_layer_cfg: Dict[str, Dict] = {}
     total_eff_bits_counter: Dict[int, int] = {}
-
-    t0 = time.perf_counter()
-    progress_total = len(layer_map)
-    for i, (prefix, shard_map) in enumerate(sorted(layer_map.items()), start=1):
-        wp, ws, wsh = load_layer_tensors(shard_map)
-        try:
-            tensors, cfg, info = convert_layer(
-                wp, ws, wsh,
-                storage_bits=storage_bits, group_size=group_size, symmetric=symmetric,
-                target_dtype=target_dtype, symmetric_out=symmetric_out,
-            )
-        except Exception as e:
-            raise RuntimeError(f"failed to convert {prefix}: {e}") from e
-
-        per_layer_cfg[prefix] = cfg
-        total_eff_bits_counter[info["effective_bits"]] = \
-            total_eff_bits_counter.get(info["effective_bits"], 0) + 1
-
-        # Target shard = the shard that held the CT weight_packed for this prefix.
-        _, target_shard = shard_map["weight_packed"]
-        target_shard_name = Path(target_shard).name
-        # Drop the three CT keys.
-        for suf in CT_SUFFIXES:
-            key = f"{prefix}.{suf}"
-            src_shard = Path(shard_map[suf][1]).name
-            quant_keys_drop_per_shard.setdefault(src_shard, set()).add(key)
-        # Add the Humming keys into target_shard. zero_point is omitted in
-        # symmetric_out mode.
-        adds = quant_keys_add_per_shard.setdefault(target_shard_name, {})
-        adds[f"{prefix}.weight"] = tensors["weight"]
-        adds[f"{prefix}.weight_scale"] = tensors["weight_scale"]
-        if "zero_point" in tensors:
-            adds[f"{prefix}.zero_point"] = tensors["zero_point"]
-
-        if i % 20 == 0 or i == progress_total:
-            dt = time.perf_counter() - t0
-            print(f"  [{i}/{progress_total}] {prefix} -> uint{info['effective_bits']}  "
-                  f"({dt:.1f}s, {i / max(dt, 1e-6):.1f} layers/s)", flush=True)
-
-    print(f"\neffective-bit histogram: {total_eff_bits_counter}")
-
-    # Now stream-write each shard with the modifications.
     new_wmap: Dict[str, str] = {}
     total_bytes = 0
-    print(f"\nwriting {len(by_shard)} shards to {out_dir}...")
-    for shard_name in sorted({Path(s).name for s in by_shard}):
+
+    shards_sorted = sorted({Path(s).name for s in by_shard})
+    t0 = time.perf_counter()
+    progress_total = len(layer_map)
+    done = 0
+
+    print(f"streaming {len(shards_sorted)} shards from {in_dir} to {out_dir}...")
+    for shard_idx, shard_name in enumerate(shards_sorted, start=1):
         src_path = in_dir / shard_name
-        drop = quant_keys_drop_per_shard.get(shard_name, set())
-        adds = quant_keys_add_per_shard.get(shard_name, {})
+        out_path = out_dir / shard_name
+        prefixes_here = sorted(prefixes_in_shard.get(shard_name, []))
+        ct_keys_to_drop = {f"{p}.{suf}" for p in prefixes_here for suf in CT_SUFFIXES}
 
         tensors_out: Dict[str, torch.Tensor] = {}
         with safe_open(str(src_path), framework="pt", device="cpu") as f:
+            # 1) Convert quantized Linears that live in this shard. Materialize
+            #    only one Linear's CT tensors at a time so RSS stays low.
+            for prefix in prefixes_here:
+                wp = f.get_tensor(f"{prefix}.weight_packed")
+                ws = f.get_tensor(f"{prefix}.weight_scale")
+                wsh = f.get_tensor(f"{prefix}.weight_shape")
+                try:
+                    tensors, cfg, info = convert_layer(
+                        wp, ws, wsh,
+                        storage_bits=storage_bits, group_size=group_size,
+                        symmetric=symmetric, target_dtype=target_dtype,
+                        symmetric_out=symmetric_out,
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"failed to convert {prefix}: {e}") from e
+                # Drop the CT inputs immediately.
+                del wp, ws, wsh
+
+                per_layer_cfg[prefix] = cfg
+                total_eff_bits_counter[info["effective_bits"]] = \
+                    total_eff_bits_counter.get(info["effective_bits"], 0) + 1
+
+                tensors_out[f"{prefix}.weight"] = tensors["weight"].contiguous()
+                tensors_out[f"{prefix}.weight_scale"] = tensors["weight_scale"].contiguous()
+                if "zero_point" in tensors:
+                    tensors_out[f"{prefix}.zero_point"] = tensors["zero_point"].contiguous()
+                done += 1
+
+            # 2) Pass-through non-quantized tensors from the same shard.
             for k in f.keys():
-                if k in drop:
+                if k in ct_keys_to_drop:
                     continue
-                tensors_out[k] = f.get_tensor(k)
-        tensors_out.update(adds)
+                tensors_out[k] = f.get_tensor(k).contiguous()
+
+        # 3) Bookkeeping + write.
         for k, v in tensors_out.items():
-            tensors_out[k] = v.contiguous()
-            total_bytes += tensors_out[k].numel() * tensors_out[k].element_size()
             new_wmap[k] = shard_name
-        out_path = out_dir / shard_name
+            total_bytes += v.numel() * v.element_size()
         save_file(tensors_out, str(out_path))
-        print(f"  {shard_name}: {len(tensors_out)} tensors")
+
+        dt = time.perf_counter() - t0
+        print(f"  [{shard_idx}/{len(shards_sorted)}] {shard_name}: "
+              f"{len(tensors_out)} tensors ({done}/{progress_total} converted)  "
+              f"elapsed={dt:.1f}s", flush=True)
+
+        # 4) Free everything so the next shard starts from a clean RSS.
+        del tensors_out
+        gc.collect()
+
+    print(f"\neffective-bit histogram: {total_eff_bits_counter}")
 
     # Write a new index.
     if idx_path.exists() or len(by_shard) > 1:
