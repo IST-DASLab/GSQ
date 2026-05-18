@@ -17,6 +17,10 @@ GSQ is a **post-training scalar quantization** method that learns per-coordinate
 
 ## Headline Results
 
+GSQ pushes the size-vs-accuracy Pareto frontier across model scales and bit widths, matching or beating prior scalar PTQ methods at the same footprint and closing most of the gap to vector-quantized baselines.
+
+![GSQ size vs accuracy Pareto frontier](assets/size_vs_accuracy.png)
+
 ### Kimi-K2.5: 2-bit GSQ vs FP base
 
 GSQ compresses Kimi-K2.5 from ~4.5 bpp down to **2.13 bpp** while preserving most of the model's reasoning, coding, and long-context behaviour. It even beats the base model on MATH 500 and LiveCodeBench v6 under our evaluation pipeline, and stays competitive on OpenAI-MRCR up to 256k tokens.
