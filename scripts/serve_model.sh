@@ -195,11 +195,11 @@ PY
 cd "${REPO_ROOT}"
 
 # Sensible local cache locations to keep Triton/Inductor off the home filesystem.
-export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${GSQ_RUNTIME}/.triton_cache}"
-export TRITON_HOME="${TRITON_HOME:-${GSQ_RUNTIME}/.triton}"
-export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${GSQ_RUNTIME}/.inductor_cache}"
-export TMPDIR="${TMPDIR:-${GSQ_RUNTIME}/.tmp}"
-mkdir -p "${TRITON_CACHE_DIR}" "${TRITON_HOME}" "${TORCHINDUCTOR_CACHE_DIR}" "${TMPDIR}"
+# export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${GSQ_RUNTIME}/.triton_cache}"
+# export TRITON_HOME="${TRITON_HOME:-${GSQ_RUNTIME}/.triton}"
+# export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${GSQ_RUNTIME}/.inductor_cache}"
+# export TMPDIR="${TMPDIR:-${GSQ_RUNTIME}/.tmp}"
+# mkdir -p "${TRITON_CACHE_DIR}" "${TRITON_HOME}" "${TORCHINDUCTOR_CACHE_DIR}" "${TMPDIR}"
 
 # Persist vLLM stdout/stderr next to the model so failures are debuggable
 # even when the terminal scrollback rolls (vLLM startup logs are huge).

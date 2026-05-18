@@ -30,7 +30,9 @@ dependencies = [
     "torchvision==0.26.0",
     "vllm==0.20.2",
     "ray",
-    "ninja"
+    "ninja",
+    "humming-kernels",
+    "matplotlib",
 ]
 
 [tool.setuptools.packages.find]
