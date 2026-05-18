@@ -641,6 +641,7 @@ def main():
         open_thoughts_max_samples=config.data.open_thoughts_max_samples,
     )
     
+    exit_code = 0
     try:
         tick = time.time()
         train_all_layers(model, train_loader, val_loader, gpt_loader, logger, config,
@@ -651,10 +652,16 @@ def main():
             print("Total time:", total_time)
             if config.wandb.enabled:
                 wandb.log({"timing/total_wall_clock_sec": total_time})
-        
+
     except KeyboardInterrupt:
-        if GLOBAL_RANK == 0:
+        exit_code = 130
+        if GLOBAL_RANK == 0 and logger is not None:
             logger.logger.info("Training interrupted.")
+
+    except Exception:
+        exit_code = 1
+        if GLOBAL_RANK == 0 and logger is not None:
+            logger.logger.exception("Training failed.")
 
     finally:
         try:
@@ -665,8 +672,13 @@ def main():
             pass
         gc.collect()
 
-        if GLOBAL_RANK == 0:
-            logger.logger.info("Training finished.")
+        if GLOBAL_RANK == 0 and logger is not None:
+            if exit_code == 0 or exit_code == 130:
+                logger.logger.info("Training finished.")
+            else:
+                logger.logger.error(
+                    "Tearing down after training failure (see exception log above)."
+                )
             report_pipeline("Teardown: closing session (no post-training barriers)")
 
         # NOTE: We deliberately skip post-training `dist.barrier()` calls.
@@ -708,7 +720,7 @@ def main():
             sys.stderr.flush()
         except Exception:
             pass
-        os._exit(0)
+        os._exit(exit_code)
 
 if __name__ == "__main__":
     main()
