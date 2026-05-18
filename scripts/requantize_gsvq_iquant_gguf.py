@@ -64,6 +64,17 @@ def parse_args():
     parser.add_argument("--no-acceptance-guard", action="store_true")
     parser.add_argument("--std", type=float, default=None)
     parser.add_argument("--strength", type=float, default=None)
+    parser.add_argument("--init-mode", default=None,
+                        choices=["binary", "prior", "target", "posterior",
+                                 "prior_delta", "target_delta", "posterior_delta"])
+    parser.add_argument("--prior-weight", type=float, default=None)
+    parser.add_argument("--target-weight", type=float, default=None)
+    parser.add_argument("--prior-radius-k", type=int, default=None)
+    parser.add_argument("--prior-radius-scale", type=float, default=None)
+    parser.add_argument("--target-norm-scale", type=float, default=None)
+    parser.add_argument("--posterior-current-bias", type=float, default=None)
+    parser.add_argument("--joint-init", action="store_true")
+    parser.add_argument("--joint-init-max-options", type=int, default=None)
     parser.add_argument("--optimizer-name", default=None, choices=["adamw", "adam", "sgd", "lion"])
     parser.add_argument("--grad-clip", type=float, default=None)
     parser.add_argument("--restarts", type=int, default=None)

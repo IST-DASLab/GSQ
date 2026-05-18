@@ -8,6 +8,7 @@ import torch
 from src.gguf_iq import GGUFIQuantStore
 from src.quantization.gsvq import (
     FactorizedIQuantGSVQ,
+    build_candidate_indices,
     build_synthetic_iquant_problem,
     train_gsvq_reconstruction,
 )
@@ -41,6 +42,57 @@ class GSVQReconstructionTest(unittest.TestCase):
         )
         history = train_gsvq_reconstruction(quantizer, steps=60, lr=0.05)
         self.assertLess(history.best_hard_mse, history.initial_hard_mse)
+
+    def test_neighbor_candidates_are_non_self(self):
+        codebook = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+        target = codebook[[1, 3]]
+        init = torch.tensor([1, 3])
+        candidates = build_candidate_indices(
+            target,
+            codebook,
+            init,
+            candidate_count=2,
+            neighbor_candidates=1,
+            target_candidates=0,
+        )
+        self.assertTrue(torch.equal(candidates[:, 0], init))
+        self.assertTrue(torch.all(candidates[:, 1] != init))
+
+    def test_posterior_delta_initialization_improves_synthetic_start(self):
+        problem = build_synthetic_iquant_problem(
+            qtype_name="IQ2_XS",
+            num_vectors=256,
+            seed=1,
+            device="cpu",
+        )
+        binary = FactorizedIQuantGSVQ(
+            problem["target_vectors"],
+            problem["scales"],
+            problem["magnitude_codebook"],
+            problem["sign_codebook"],
+            problem["init_magnitude_indices"],
+            problem["init_sign_indices"],
+            importance=problem["importance"],
+            candidate_count=8,
+            neighbor_candidates=3,
+            target_candidates=4,
+        )
+        posterior = FactorizedIQuantGSVQ(
+            problem["target_vectors"],
+            problem["scales"],
+            problem["magnitude_codebook"],
+            problem["sign_codebook"],
+            problem["init_magnitude_indices"],
+            problem["init_sign_indices"],
+            importance=problem["importance"],
+            candidate_count=8,
+            neighbor_candidates=3,
+            target_candidates=4,
+            init_mode="posterior_delta",
+            joint_init=True,
+        )
+        self.assertTrue(torch.isfinite(posterior.magnitude_prior_logits).all())
+        self.assertLess(posterior.reconstruction_mse(hard=True), binary.reconstruction_mse(hard=True))
 
     @unittest.skipUnless(os.path.exists(LOCAL_QWEN3_GGUF), "local Qwen3 GGUF not available")
     def test_local_iq2_xs_decomposition_reconstructs_dense_dequant(self):

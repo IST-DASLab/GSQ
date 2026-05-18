@@ -43,6 +43,15 @@ PRESETS = {
         "target_candidates": 8,
         "std": 0.01,
         "strength": 6.0,
+        "init_mode": "binary",
+        "prior_weight": 1.0,
+        "target_weight": 1.0,
+        "prior_radius_k": 16,
+        "prior_radius_scale": 1.0,
+        "target_norm_scale": 1.0,
+        "posterior_current_bias": 0.0,
+        "joint_init": False,
+        "joint_init_max_options": 512,
         "optimizer_name": "lion",
         "grad_clip": 0.0,
         "restarts": 1,
@@ -58,6 +67,15 @@ PRESETS = {
         "target_candidates": 8,
         "std": 0.01,
         "strength": 0.25,
+        "init_mode": "binary",
+        "prior_weight": 1.0,
+        "target_weight": 1.0,
+        "prior_radius_k": 16,
+        "prior_radius_scale": 1.0,
+        "target_norm_scale": 1.0,
+        "posterior_current_bias": 0.0,
+        "joint_init": False,
+        "joint_init_max_options": 512,
         "optimizer_name": "adamw",
         "grad_clip": 0.0,
         "restarts": 1,
@@ -93,6 +111,17 @@ def parse_args():
     parser.add_argument("--no-acceptance-guard", action="store_true")
     parser.add_argument("--std", type=float, default=None)
     parser.add_argument("--strength", type=float, default=None)
+    parser.add_argument("--init-mode", default=None,
+                        choices=["binary", "prior", "target", "posterior",
+                                 "prior_delta", "target_delta", "posterior_delta"])
+    parser.add_argument("--prior-weight", type=float, default=None)
+    parser.add_argument("--target-weight", type=float, default=None)
+    parser.add_argument("--prior-radius-k", type=int, default=None)
+    parser.add_argument("--prior-radius-scale", type=float, default=None)
+    parser.add_argument("--target-norm-scale", type=float, default=None)
+    parser.add_argument("--posterior-current-bias", type=float, default=None)
+    parser.add_argument("--joint-init", action="store_true")
+    parser.add_argument("--joint-init-max-options", type=int, default=None)
     parser.add_argument("--optimizer-name", default=None, choices=["adamw", "adam", "sgd", "lion"])
     parser.add_argument("--grad-clip", type=float, default=None)
     parser.add_argument("--restarts", type=int, default=None)
@@ -111,6 +140,14 @@ def _params(args):
         "target_candidates",
         "std",
         "strength",
+        "init_mode",
+        "prior_weight",
+        "target_weight",
+        "prior_radius_k",
+        "prior_radius_scale",
+        "target_norm_scale",
+        "posterior_current_bias",
+        "joint_init_max_options",
         "optimizer_name",
         "grad_clip",
         "restarts",
@@ -118,6 +155,8 @@ def _params(args):
         value = getattr(args, key.replace("-", "_"), None)
         if value is not None:
             params[key] = value
+    if args.joint_init:
+        params["joint_init"] = True
     if args.temp_start is not None or args.temp_end is not None:
         params["temperature"] = (
             args.temp_start if args.temp_start is not None else params["temperature"][0],
@@ -183,6 +222,15 @@ def _make_quantizer(decomp, target_vectors, start, end, params, device, rotation
             target_candidates=params["target_candidates"],
             std=params["std"],
             strength=params["strength"],
+            init_mode=params["init_mode"],
+            prior_weight=params["prior_weight"],
+            target_weight=params["target_weight"],
+            prior_radius_k=params["prior_radius_k"],
+            prior_radius_scale=params["prior_radius_scale"],
+            target_norm_scale=params["target_norm_scale"],
+            posterior_current_bias=params["posterior_current_bias"],
+            joint_init=params["joint_init"],
+            joint_init_max_options=params["joint_init_max_options"],
             rotation_trick=rotation_trick,
         )
     return FactorizedIQuantGSVQ(
@@ -197,6 +245,15 @@ def _make_quantizer(decomp, target_vectors, start, end, params, device, rotation
         target_candidates=params["target_candidates"],
         std=params["std"],
         strength=params["strength"],
+        init_mode=params["init_mode"],
+        prior_weight=params["prior_weight"],
+        target_weight=params["target_weight"],
+        prior_radius_k=params["prior_radius_k"],
+        prior_radius_scale=params["prior_radius_scale"],
+        target_norm_scale=params["target_norm_scale"],
+        posterior_current_bias=params["posterior_current_bias"],
+        joint_init=params["joint_init"],
+        joint_init_max_options=params["joint_init_max_options"],
         rotation_trick=rotation_trick,
     )
 

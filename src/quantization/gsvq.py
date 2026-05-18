@@ -110,9 +110,11 @@ def codebook_neighbor_indices(
     *,
     topk: int,
     weights: Optional[torch.Tensor] = None,
+    include_self: bool = False,
 ) -> torch.Tensor:
     """Precompute top-k codebook neighbors for shift-style candidate sets."""
-    topk = max(1, min(int(topk), codebook.shape[0]))
+    max_neighbors = codebook.shape[0] if include_self else max(1, codebook.shape[0] - 1)
+    topk = max(1, min(int(topk), max_neighbors))
     if weights is not None:
         # A single static neighbor table only makes sense for shared weights.
         if weights.ndim != 1:
@@ -120,7 +122,142 @@ def codebook_neighbor_indices(
         dist = _weighted_sqdist(codebook.float(), codebook.float(), weights.view(1, -1))
     else:
         dist = _weighted_sqdist(codebook.float(), codebook.float())
+    if not include_self:
+        dist = dist.clone()
+        dist.fill_diagonal_(float("inf"))
     return torch.topk(dist, k=topk, dim=-1, largest=False).indices
+
+
+def codebook_local_radii(
+    codebook: torch.Tensor,
+    *,
+    topk: int = 16,
+    weights: Optional[torch.Tensor] = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Local squared-distance scale for each codebook row.
+
+    IQuant codebooks are not density-uniform. This radius turns raw distances
+    from the initial code into "local neighbor steps" before applying a
+    Gaussian prior.
+    """
+    neighbors = codebook_neighbor_indices(codebook, topk=topk, weights=weights, include_self=False)
+    candidates = codebook[neighbors]
+    dist = (candidates.float() - codebook.float()[:, None, :]).square()
+    if weights is not None:
+        dist = dist * weights.float().view(1, 1, -1)
+    radius = dist.sum(dim=-1).mean(dim=-1)
+    finite = radius[torch.isfinite(radius) & (radius > eps)]
+    fallback = finite.median() if finite.numel() else torch.ones((), device=codebook.device)
+    return torch.where(radius > eps, radius, fallback).clamp_min(eps)
+
+
+def normalized_gaussian_prior_logits(
+    candidate_indices: torch.Tensor,
+    codebook: torch.Tensor,
+    init_indices: torch.Tensor,
+    *,
+    prior_radius_k: int = 16,
+    prior_radius_scale: float = 1.0,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Gaussian shift prior normalized by each code's local radius."""
+    init_indices = init_indices.to(candidate_indices.device).reshape(-1)
+    radii = codebook_local_radii(codebook, topk=prior_radius_k, eps=eps)
+    init = codebook[init_indices].float()
+    candidates = codebook[candidate_indices].float()
+    dist = (candidates - init[:, None, :]).square().sum(dim=-1)
+    scale = (float(prior_radius_scale) ** 2) * radii[init_indices].view(-1, 1)
+    logits = -0.5 * dist / scale.clamp_min(eps)
+    return logits - logits.max(dim=-1, keepdim=True).values
+
+
+def _row_spread(centered: torch.Tensor, *, eps: float = 1e-8) -> torch.Tensor:
+    spread = centered.mean(dim=-1, keepdim=True)
+    fallback = centered.max(dim=-1, keepdim=True).values
+    spread = torch.where(spread > eps, spread, fallback)
+    return spread.clamp_min(eps)
+
+
+def normalized_target_likelihood_logits(
+    target_vectors: torch.Tensor,
+    codebook: torch.Tensor,
+    candidate_indices: torch.Tensor,
+    *,
+    weights: Optional[torch.Tensor] = None,
+    target_norm_scale: float = 1.0,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Row-normalized target likelihood over a candidate set."""
+    candidates = codebook[candidate_indices].float()
+    diff = target_vectors.float()[:, None, :] - candidates
+    dist = diff.square()
+    if weights is not None:
+        dist = dist * weights.float()[:, None, :]
+    dist = dist.sum(dim=-1)
+    centered = dist - dist.min(dim=-1, keepdim=True).values
+    logits = -centered / (float(target_norm_scale) * _row_spread(centered, eps=eps))
+    return logits - logits.max(dim=-1, keepdim=True).values
+
+
+def _posterior_logits(
+    target_vectors: torch.Tensor,
+    codebook: torch.Tensor,
+    candidate_indices: torch.Tensor,
+    init_indices: torch.Tensor,
+    *,
+    weights: Optional[torch.Tensor],
+    init_mode: str,
+    prior_weight: float,
+    target_weight: float,
+    prior_radius_k: int,
+    prior_radius_scale: float,
+    target_norm_scale: float,
+    target_logits_override: Optional[torch.Tensor] = None,
+    current_bias: float = 0.0,
+) -> torch.Tensor:
+    base_mode = init_mode.removesuffix("_delta")
+    pieces = []
+    if base_mode in {"prior", "posterior"} and prior_weight != 0.0:
+        pieces.append(float(prior_weight) * normalized_gaussian_prior_logits(
+            candidate_indices,
+            codebook,
+            init_indices,
+            prior_radius_k=prior_radius_k,
+            prior_radius_scale=prior_radius_scale,
+        ))
+    if base_mode in {"target", "posterior"} and target_weight != 0.0:
+        if target_logits_override is None:
+            target_logits = normalized_target_likelihood_logits(
+                target_vectors,
+                codebook,
+                candidate_indices,
+                weights=weights,
+                target_norm_scale=target_norm_scale,
+            )
+        else:
+            target_logits = target_logits_override
+        pieces.append(float(target_weight) * target_logits)
+    if not pieces:
+        logits = torch.zeros(candidate_indices.shape, device=candidate_indices.device, dtype=torch.float32)
+    else:
+        logits = sum(pieces)
+    if current_bias:
+        logits = logits + (candidate_indices == init_indices.to(candidate_indices.device).reshape(-1, 1)).float() * current_bias
+    return logits - logits.max(dim=-1, keepdim=True).values
+
+
+def _make_train_and_prior_logits(
+    posterior: torch.Tensor,
+    *,
+    init_mode: str,
+    std: float,
+    logits_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    noise = float(std) * torch.randn_like(posterior)
+    if init_mode.endswith("_delta"):
+        return noise.to(logits_dtype).detach(), posterior.detach()
+    return (posterior + noise).to(logits_dtype).detach(), torch.empty(0, device=posterior.device)
 
 
 def build_candidate_indices(
@@ -152,8 +289,8 @@ def build_candidate_indices(
 
     parts = [init_indices[:, None].to(torch.long)]
 
-    if neighbor_candidates > 1:
-        neighbors = codebook_neighbor_indices(codebook, topk=neighbor_candidates)
+    if neighbor_candidates > 0:
+        neighbors = codebook_neighbor_indices(codebook, topk=neighbor_candidates, include_self=False)
         parts.append(neighbors[init_indices.to(torch.long)])
 
     if target_candidates > 0:
@@ -254,6 +391,15 @@ class FactorizedIQuantGSVQ(nn.Module):
         target_candidates: int = 8,
         std: float = 0.01,
         strength: float = 0.25,
+        init_mode: str = "binary",
+        prior_weight: float = 1.0,
+        target_weight: float = 1.0,
+        prior_radius_k: int = 16,
+        prior_radius_scale: float = 1.0,
+        target_norm_scale: float = 1.0,
+        posterior_current_bias: float = 0.0,
+        joint_init: bool = False,
+        joint_init_max_options: int = 512,
         logits_dtype: torch.dtype = torch.float32,
         rotation_trick: bool = False,
         chunk_size: int = 8192,
@@ -320,10 +466,73 @@ class FactorizedIQuantGSVQ(nn.Module):
         self.register_buffer("magnitude_candidate_indices", mag_candidates)
         self.register_buffer("sign_candidate_indices", sign_candidates)
 
-        mag_init_logits = self._initial_logits(mag_candidates, init_magnitude_indices, std, strength, logits_dtype)
-        sign_init_logits = self._initial_logits(sign_candidates, init_sign_indices, std, strength, logits_dtype)
+        init_mode = init_mode.lower()
+        if init_mode == "binary":
+            mag_init_logits = self._initial_logits(mag_candidates, init_magnitude_indices, std, strength, logits_dtype)
+            sign_init_logits = self._initial_logits(sign_candidates, init_sign_indices, std, strength, logits_dtype)
+            mag_prior_logits = torch.empty(0, device=target_vectors.device)
+            sign_prior_logits = torch.empty(0, device=target_vectors.device)
+        else:
+            mag_target_logits = None
+            sign_target_logits = None
+            if joint_init and mag_candidates.shape[1] * sign_candidates.shape[1] <= int(joint_init_max_options):
+                mag_target_logits, sign_target_logits = self._joint_target_logits(
+                    target_vectors,
+                    scales,
+                    magnitude_codebook,
+                    sign_codebook,
+                    mag_candidates,
+                    sign_candidates,
+                    self.importance,
+                    target_norm_scale,
+                )
+            mag_posterior = _posterior_logits(
+                magnitude_target,
+                magnitude_codebook,
+                mag_candidates,
+                init_magnitude_indices,
+                weights=self.importance,
+                init_mode=init_mode,
+                prior_weight=prior_weight,
+                target_weight=target_weight,
+                prior_radius_k=prior_radius_k,
+                prior_radius_scale=prior_radius_scale,
+                target_norm_scale=target_norm_scale,
+                target_logits_override=mag_target_logits,
+                current_bias=posterior_current_bias,
+            )
+            sign_posterior = _posterior_logits(
+                sign_target,
+                sign_codebook,
+                sign_candidates,
+                init_sign_indices,
+                weights=self.importance,
+                init_mode=init_mode,
+                prior_weight=prior_weight,
+                target_weight=target_weight,
+                prior_radius_k=prior_radius_k,
+                prior_radius_scale=prior_radius_scale,
+                target_norm_scale=target_norm_scale,
+                target_logits_override=sign_target_logits,
+                current_bias=posterior_current_bias,
+            )
+            mag_init_logits, mag_prior_logits = _make_train_and_prior_logits(
+                mag_posterior,
+                init_mode=init_mode,
+                std=std,
+                logits_dtype=logits_dtype,
+            )
+            sign_init_logits, sign_prior_logits = _make_train_and_prior_logits(
+                sign_posterior,
+                init_mode=init_mode,
+                std=std,
+                logits_dtype=logits_dtype,
+            )
+        self.init_mode = init_mode
         self.magnitude_logits = nn.Parameter(mag_init_logits)
         self.sign_logits = nn.Parameter(sign_init_logits)
+        self.register_buffer("magnitude_prior_logits", mag_prior_logits)
+        self.register_buffer("sign_prior_logits", sign_prior_logits)
 
     @staticmethod
     def _initial_logits(
@@ -339,6 +548,37 @@ class FactorizedIQuantGSVQ(nn.Module):
         logits = logits + std * torch.randn_like(logits)
         return logits.to(logits_dtype).detach()
 
+    @staticmethod
+    def _joint_target_logits(
+        target_vectors: torch.Tensor,
+        scales: torch.Tensor,
+        magnitude_codebook: torch.Tensor,
+        sign_codebook: torch.Tensor,
+        magnitude_candidate_indices: torch.Tensor,
+        sign_candidate_indices: torch.Tensor,
+        importance: torch.Tensor,
+        target_norm_scale: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mag = magnitude_codebook[magnitude_candidate_indices].float()
+        sign = sign_codebook[sign_candidate_indices].float()
+        pred = scales[:, None, None, :] * mag[:, :, None, :] * sign[:, None, :, :]
+        dist = (pred - target_vectors.float()[:, None, None, :]).square() * importance[:, None, None, :]
+        cost = dist.sum(dim=-1)
+        centered = cost - cost.amin(dim=(1, 2), keepdim=True)
+        spread = _row_spread(centered.flatten(1), eps=1e-8)
+        mag_logits = -centered.amin(dim=2) / (float(target_norm_scale) * spread)
+        sign_logits = -centered.amin(dim=1) / (float(target_norm_scale) * spread)
+        return (
+            mag_logits - mag_logits.max(dim=-1, keepdim=True).values,
+            sign_logits - sign_logits.max(dim=-1, keepdim=True).values,
+        )
+
+    @staticmethod
+    def _score_logits(logits: torch.Tensor, prior_logits: torch.Tensor, logit_scale: float) -> torch.Tensor:
+        if prior_logits.numel():
+            return prior_logits.float() + logits.float()
+        return logits.float() * float(logit_scale)
+
     def _sample_codebook(
         self,
         logits: torch.Tensor,
@@ -346,10 +586,12 @@ class FactorizedIQuantGSVQ(nn.Module):
         codebook: torch.Tensor,
         temperature: float,
         logit_scale: float,
+        prior_logits: torch.Tensor,
     ) -> torch.Tensor:
         eps = 1e-8
         noise = -torch.log(-torch.log(torch.rand_like(logits.float()) + eps) + eps)
-        probs = F.softmax((logits.float() * float(logit_scale) + noise) / float(temperature), dim=-1)
+        scores = FactorizedIQuantGSVQ._score_logits(logits, prior_logits, logit_scale)
+        probs = F.softmax((scores + noise) / float(temperature), dim=-1)
         candidates = codebook[candidate_indices]
         return (probs[..., None] * candidates).sum(dim=1)
 
@@ -358,9 +600,10 @@ class FactorizedIQuantGSVQ(nn.Module):
         logits: torch.Tensor,
         candidate_indices: torch.Tensor,
         codebook: torch.Tensor,
+        prior_logits: torch.Tensor,
     ) -> torch.Tensor:
         row = torch.arange(logits.shape[0], device=logits.device)
-        selected = candidate_indices[row, logits.argmax(dim=-1)]
+        selected = candidate_indices[row, FactorizedIQuantGSVQ._score_logits(logits, prior_logits, 1.0).argmax(dim=-1)]
         return codebook[selected]
 
     def forward_vectors(self, temperature: float = 1.0, scale: float = 1.0) -> torch.Tensor:
@@ -370,6 +613,7 @@ class FactorizedIQuantGSVQ(nn.Module):
             self.magnitude_codebook,
             temperature,
             scale,
+            self.magnitude_prior_logits,
         )
         sign = self._sample_codebook(
             self.sign_logits,
@@ -377,6 +621,7 @@ class FactorizedIQuantGSVQ(nn.Module):
             self.sign_codebook,
             temperature,
             scale,
+            self.sign_prior_logits,
         )
         out = self.scales * mag * sign
         if self.rotation_trick:
@@ -394,19 +639,27 @@ class FactorizedIQuantGSVQ(nn.Module):
             self.magnitude_logits,
             self.magnitude_candidate_indices,
             self.magnitude_codebook,
+            self.magnitude_prior_logits,
         )
         sign = self._hard_codebook(
             self.sign_logits,
             self.sign_candidate_indices,
             self.sign_codebook,
+            self.sign_prior_logits,
         )
         return self.scales * mag * sign
 
     def get_hard_indices(self) -> dict[str, torch.Tensor]:
         row = torch.arange(self.magnitude_logits.shape[0], device=self.magnitude_logits.device)
         return {
-            "magnitude_indices": self.magnitude_candidate_indices[row, self.magnitude_logits.argmax(dim=-1)],
-            "sign_indices": self.sign_candidate_indices[row, self.sign_logits.argmax(dim=-1)],
+            "magnitude_indices": self.magnitude_candidate_indices[
+                row, FactorizedIQuantGSVQ._score_logits(
+                    self.magnitude_logits, self.magnitude_prior_logits, 1.0
+                ).argmax(dim=-1)
+            ],
+            "sign_indices": self.sign_candidate_indices[
+                row, FactorizedIQuantGSVQ._score_logits(self.sign_logits, self.sign_prior_logits, 1.0).argmax(dim=-1)
+            ],
         }
 
     def get_hard_weights(self):
@@ -418,6 +671,8 @@ class FactorizedIQuantGSVQ(nn.Module):
             "sign_candidate_indices": self.sign_candidate_indices,
             "magnitude_logits": self.magnitude_logits.detach(),
             "sign_logits": self.sign_logits.detach(),
+            "magnitude_prior_logits": self.magnitude_prior_logits,
+            "sign_prior_logits": self.sign_prior_logits,
             "scales": self.scales,
         }
 
@@ -450,6 +705,15 @@ class PairedMagnitudeIQuantGSVQ(nn.Module):
         target_candidates: int = 8,
         std: float = 0.01,
         strength: float = 0.25,
+        init_mode: str = "binary",
+        prior_weight: float = 1.0,
+        target_weight: float = 1.0,
+        prior_radius_k: int = 16,
+        prior_radius_scale: float = 1.0,
+        target_norm_scale: float = 1.0,
+        posterior_current_bias: float = 0.0,
+        joint_init: bool = False,
+        joint_init_max_options: int = 512,
         logits_dtype: torch.dtype = torch.float32,
         rotation_trick: bool = False,
         chunk_size: int = 8192,
@@ -524,47 +788,176 @@ class PairedMagnitudeIQuantGSVQ(nn.Module):
         self.register_buffer("second_magnitude_candidate_indices", second_candidates)
         self.register_buffer("sign_candidate_indices", sign_candidates)
 
-        self.first_magnitude_logits = nn.Parameter(
-            FactorizedIQuantGSVQ._initial_logits(
+        init_mode = init_mode.lower()
+        if init_mode == "binary":
+            first_init_logits = FactorizedIQuantGSVQ._initial_logits(
                 first_candidates, init_first_magnitude_indices, std, strength, logits_dtype
             )
-        )
-        self.second_magnitude_logits = nn.Parameter(
-            FactorizedIQuantGSVQ._initial_logits(
+            second_init_logits = FactorizedIQuantGSVQ._initial_logits(
                 second_candidates, init_second_magnitude_indices, std, strength, logits_dtype
             )
-        )
-        self.sign_logits = nn.Parameter(
-            FactorizedIQuantGSVQ._initial_logits(sign_candidates, init_sign_indices, std, strength, logits_dtype)
+            sign_init_logits = FactorizedIQuantGSVQ._initial_logits(
+                sign_candidates, init_sign_indices, std, strength, logits_dtype
+            )
+            first_prior_logits = torch.empty(0, device=target_vectors.device)
+            second_prior_logits = torch.empty(0, device=target_vectors.device)
+            sign_prior_logits = torch.empty(0, device=target_vectors.device)
+        else:
+            first_target_logits = None
+            second_target_logits = None
+            sign_target_logits = None
+            option_count = first_candidates.shape[1] * second_candidates.shape[1] * sign_candidates.shape[1]
+            if joint_init and option_count <= int(joint_init_max_options):
+                first_target_logits, second_target_logits, sign_target_logits = self._joint_target_logits(
+                    target_vectors,
+                    scales,
+                    half_magnitude_codebook,
+                    sign_codebook,
+                    first_candidates,
+                    second_candidates,
+                    sign_candidates,
+                    self.importance,
+                    target_norm_scale,
+                )
+            first_posterior = _posterior_logits(
+                magnitude_target[:, :half_dim],
+                half_magnitude_codebook,
+                first_candidates,
+                init_first_magnitude_indices,
+                weights=self.importance[:, :half_dim],
+                init_mode=init_mode,
+                prior_weight=prior_weight,
+                target_weight=target_weight,
+                prior_radius_k=prior_radius_k,
+                prior_radius_scale=prior_radius_scale,
+                target_norm_scale=target_norm_scale,
+                target_logits_override=first_target_logits,
+                current_bias=posterior_current_bias,
+            )
+            second_posterior = _posterior_logits(
+                magnitude_target[:, half_dim:],
+                half_magnitude_codebook,
+                second_candidates,
+                init_second_magnitude_indices,
+                weights=self.importance[:, half_dim:],
+                init_mode=init_mode,
+                prior_weight=prior_weight,
+                target_weight=target_weight,
+                prior_radius_k=prior_radius_k,
+                prior_radius_scale=prior_radius_scale,
+                target_norm_scale=target_norm_scale,
+                target_logits_override=second_target_logits,
+                current_bias=posterior_current_bias,
+            )
+            sign_posterior = _posterior_logits(
+                sign_target,
+                sign_codebook,
+                sign_candidates,
+                init_sign_indices,
+                weights=self.importance,
+                init_mode=init_mode,
+                prior_weight=prior_weight,
+                target_weight=target_weight,
+                prior_radius_k=prior_radius_k,
+                prior_radius_scale=prior_radius_scale,
+                target_norm_scale=target_norm_scale,
+                target_logits_override=sign_target_logits,
+                current_bias=posterior_current_bias,
+            )
+            first_init_logits, first_prior_logits = _make_train_and_prior_logits(
+                first_posterior,
+                init_mode=init_mode,
+                std=std,
+                logits_dtype=logits_dtype,
+            )
+            second_init_logits, second_prior_logits = _make_train_and_prior_logits(
+                second_posterior,
+                init_mode=init_mode,
+                std=std,
+                logits_dtype=logits_dtype,
+            )
+            sign_init_logits, sign_prior_logits = _make_train_and_prior_logits(
+                sign_posterior,
+                init_mode=init_mode,
+                std=std,
+                logits_dtype=logits_dtype,
+            )
+        self.init_mode = init_mode
+        self.first_magnitude_logits = nn.Parameter(first_init_logits)
+        self.second_magnitude_logits = nn.Parameter(second_init_logits)
+        self.sign_logits = nn.Parameter(sign_init_logits)
+        self.register_buffer("first_magnitude_prior_logits", first_prior_logits)
+        self.register_buffer("second_magnitude_prior_logits", second_prior_logits)
+        self.register_buffer("sign_prior_logits", sign_prior_logits)
+
+    @staticmethod
+    def _joint_target_logits(
+        target_vectors: torch.Tensor,
+        scales: torch.Tensor,
+        half_magnitude_codebook: torch.Tensor,
+        sign_codebook: torch.Tensor,
+        first_candidate_indices: torch.Tensor,
+        second_candidate_indices: torch.Tensor,
+        sign_candidate_indices: torch.Tensor,
+        importance: torch.Tensor,
+        target_norm_scale: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        first = half_magnitude_codebook[first_candidate_indices].float()
+        second = half_magnitude_codebook[second_candidate_indices].float()
+        sign = sign_codebook[sign_candidate_indices].float()
+        mag = torch.cat([
+            first[:, :, None, None, :].expand(-1, -1, second.shape[1], sign.shape[1], -1),
+            second[:, None, :, None, :].expand(-1, first.shape[1], -1, sign.shape[1], -1),
+        ], dim=-1)
+        pred = scales[:, None, None, None, :] * mag * sign[:, None, None, :, :]
+        dist = (pred - target_vectors.float()[:, None, None, None, :]).square()
+        cost = (dist * importance[:, None, None, None, :]).sum(dim=-1)
+        centered = cost - cost.amin(dim=(1, 2, 3), keepdim=True)
+        spread = _row_spread(centered.flatten(1), eps=1e-8)
+        first_logits = -centered.amin(dim=(2, 3)) / (float(target_norm_scale) * spread)
+        second_logits = -centered.amin(dim=(1, 3)) / (float(target_norm_scale) * spread)
+        sign_logits = -centered.amin(dim=(1, 2)) / (float(target_norm_scale) * spread)
+        return (
+            first_logits - first_logits.max(dim=-1, keepdim=True).values,
+            second_logits - second_logits.max(dim=-1, keepdim=True).values,
+            sign_logits - sign_logits.max(dim=-1, keepdim=True).values,
         )
 
     def _sample_codebook(self, logits, candidate_indices, codebook, temperature, logit_scale):
-        return FactorizedIQuantGSVQ._sample_codebook(self, logits, candidate_indices, codebook, temperature, logit_scale)
+        raise RuntimeError("PairedMagnitudeIQuantGSVQ._sample_codebook requires prior logits")
 
-    def _hard_codebook(self, logits, candidate_indices, codebook):
-        return FactorizedIQuantGSVQ._hard_codebook(self, logits, candidate_indices, codebook)
+    def _sample_codebook_with_prior(self, logits, candidate_indices, codebook, temperature, logit_scale, prior_logits):
+        return FactorizedIQuantGSVQ._sample_codebook(
+            self, logits, candidate_indices, codebook, temperature, logit_scale, prior_logits
+        )
+
+    def _hard_codebook(self, logits, candidate_indices, codebook, prior_logits):
+        return FactorizedIQuantGSVQ._hard_codebook(self, logits, candidate_indices, codebook, prior_logits)
 
     def forward_vectors(self, temperature: float = 1.0, scale: float = 1.0) -> torch.Tensor:
-        first = self._sample_codebook(
+        first = self._sample_codebook_with_prior(
             self.first_magnitude_logits,
             self.first_magnitude_candidate_indices,
             self.half_magnitude_codebook,
             temperature,
             scale,
+            self.first_magnitude_prior_logits,
         )
-        second = self._sample_codebook(
+        second = self._sample_codebook_with_prior(
             self.second_magnitude_logits,
             self.second_magnitude_candidate_indices,
             self.half_magnitude_codebook,
             temperature,
             scale,
+            self.second_magnitude_prior_logits,
         )
-        sign = self._sample_codebook(
+        sign = self._sample_codebook_with_prior(
             self.sign_logits,
             self.sign_candidate_indices,
             self.sign_codebook,
             temperature,
             scale,
+            self.sign_prior_logits,
         )
         out = self.scales * torch.cat([first, second], dim=-1) * sign
         if self.rotation_trick:
@@ -582,25 +975,33 @@ class PairedMagnitudeIQuantGSVQ(nn.Module):
             self.first_magnitude_logits,
             self.first_magnitude_candidate_indices,
             self.half_magnitude_codebook,
+            self.first_magnitude_prior_logits,
         )
         second = self._hard_codebook(
             self.second_magnitude_logits,
             self.second_magnitude_candidate_indices,
             self.half_magnitude_codebook,
+            self.second_magnitude_prior_logits,
         )
-        sign = self._hard_codebook(self.sign_logits, self.sign_candidate_indices, self.sign_codebook)
+        sign = self._hard_codebook(self.sign_logits, self.sign_candidate_indices, self.sign_codebook, self.sign_prior_logits)
         return self.scales * torch.cat([first, second], dim=-1) * sign
 
     def get_hard_indices(self) -> dict[str, torch.Tensor]:
         row = torch.arange(self.first_magnitude_logits.shape[0], device=self.first_magnitude_logits.device)
         return {
             "first_magnitude_indices": self.first_magnitude_candidate_indices[
-                row, self.first_magnitude_logits.argmax(dim=-1)
+                row, FactorizedIQuantGSVQ._score_logits(
+                    self.first_magnitude_logits, self.first_magnitude_prior_logits, 1.0
+                ).argmax(dim=-1)
             ],
             "second_magnitude_indices": self.second_magnitude_candidate_indices[
-                row, self.second_magnitude_logits.argmax(dim=-1)
+                row, FactorizedIQuantGSVQ._score_logits(
+                    self.second_magnitude_logits, self.second_magnitude_prior_logits, 1.0
+                ).argmax(dim=-1)
             ],
-            "sign_indices": self.sign_candidate_indices[row, self.sign_logits.argmax(dim=-1)],
+            "sign_indices": self.sign_candidate_indices[
+                row, FactorizedIQuantGSVQ._score_logits(self.sign_logits, self.sign_prior_logits, 1.0).argmax(dim=-1)
+            ],
         }
 
     def get_hard_weights(self):
@@ -614,6 +1015,9 @@ class PairedMagnitudeIQuantGSVQ(nn.Module):
             "first_magnitude_logits": self.first_magnitude_logits.detach(),
             "second_magnitude_logits": self.second_magnitude_logits.detach(),
             "sign_logits": self.sign_logits.detach(),
+            "first_magnitude_prior_logits": self.first_magnitude_prior_logits,
+            "second_magnitude_prior_logits": self.second_magnitude_prior_logits,
+            "sign_prior_logits": self.sign_prior_logits,
             "scales": self.scales,
         }
 

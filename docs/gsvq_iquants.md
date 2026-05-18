@@ -42,6 +42,14 @@ MSE.
 - Exact IQ3_XXS/IQ3_S decomposition and byte repacking for IQ2_XS, IQ2_S,
   IQ2_XXS, IQ3_XXS, and IQ3_S. Repacking preserves fixed GGUF scales and only
   changes discrete assignment payloads.
+- Normalized initialization modes for IQuant GSVQ:
+  - non-self neighbor candidate generation;
+  - local-radius Gaussian shift priors over codebook neighborhoods;
+  - row-normalized dense-target likelihood logits;
+  - fixed-prior delta modes that do not amplify the prior with the GS logit
+    scale schedule;
+  - optional joint marginal target initialization across magnitude/sign
+    candidates.
 - Full-GGUF IQuant patching via `scripts/requantize_gsvq_iquant_gguf.py`.
 - Dense-reference KL evaluation for original vs patched GGUF weights via
   `scripts/eval_gguf_kl.py`.
@@ -202,3 +210,79 @@ Conclusion: the fixed-scale assignment-only GSVQ pass reliably decreases
 IQuant weight reconstruction error, but it did not improve end-to-end KL for
 this full Qwen3-4B Unsloth GGUF. On the two Wikitext2 checks above, KL worsened
 despite the `2.5914%` IQuant reconstruction MSE reduction.
+
+## Normalized Initialization Ablation
+
+The old initialization used a binary logit bias on the current GGUF code. That
+made wider candidate sets hard to use: when candidate count increased from the
+effective old `init + target` pair to `init + real neighbors + target`, the
+representative-layer reconstruction gain collapsed.
+
+New initialization components:
+
+- candidate neighbors exclude the current code, so `neighbor_candidates=1`
+  means one real non-self neighbor;
+- local-radius Gaussian prior:
+  `-0.5 * ||code_j - code_init||^2 / local_radius(init)`;
+- row-normalized target likelihood:
+  `-(err_j - min(err)) / mean_j(err_j - min(err))`;
+- `*_delta` modes keep the prior/likelihood logits fixed and train only a
+  delta, avoiding late amplification of the prior by the GS logit-scale
+  schedule;
+- joint marginal initialization scores magnitude/sign candidates by minimizing
+  over the other factor before initializing factorized logits.
+
+Representative ablation: layers `0,7,14,35`, first `8192` vectors per tensor,
+100 steps, `lr=0.12`.
+
+```text
+target_delta_joint_c3_n1_t1       rel 3.702%
+target_delta_c3_n1_t1             rel 3.566%
+posterior_delta_c3_n1_t1_pw025    rel 3.538%
+binary_c2_t1                      rel 3.373%
+posterior_delta_c3_n1_t1          rel 3.349%
+posterior_c3_n1_t1                rel 3.272%
+target_delta_c4_n1_t2             rel 3.000%
+target_delta_c5_n2_t2             rel 2.861%
+posterior_c8_n4_t4                rel 2.641%
+posterior_delta_c8_n4_t4          rel 2.599%
+binary_c8_n4_t4                   rel 0.208%
+```
+
+Full all-IQuant run for the best representative initialization:
+
+```text
+init_mode=target_delta
+joint_init=true
+candidate_count=3
+neighbor_candidates=1
+target_candidates=1
+steps=800
+lr=0.12
+
+2.310157283154e-05 -> 2.247843325782e-05
+relative reduction = 2.6974%
+```
+
+This beats the previous best full reconstruction result (`2.5818%` in the
+read-only sweep, `2.5914%` in the patched-GGUF run). The improvement came
+mostly from IQ2_XS attention tensors; wide binary neighbor search remained bad.
+
+End-to-end KL still worsened after patching the full GGUF:
+
+```text
+Wikitext2, 64 sequences, 16,320 positions:
+original GGUF KL: 0.510352478 nats/token
+new GSVQ GGUF KL: 0.527014296 nats/token
+delta           : -0.016661818 nats/token (-3.2648% relative)
+
+Wikitext2, 128 sequences, 32,640 positions:
+original GGUF KL: 0.497392662 nats/token
+new GSVQ GGUF KL: 0.518081333 nats/token
+delta           : -0.020688671 nats/token (-4.1594% relative)
+```
+
+Conclusion: normalized initialization fixes the immediate neighbor-search
+problem and improves full fixed-scale reconstruction, but it makes the
+end-to-end KL problem more obvious. The next gate should be activation/KL-aware
+acceptance before patching a tensor, not more weight-MSE-only optimization.

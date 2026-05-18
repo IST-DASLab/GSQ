@@ -1,0 +1,84 @@
+{
+  "model": {
+    "dense_hf": "Qwen/Qwen3-4B",
+    "gguf": "unsloth/Qwen3-4B-GGUF/Qwen3-4B-UD-Q2_K_XL.gguf"
+  },
+  "implementation": {
+    "neighbor_candidates_are_non_self": true,
+    "initialization_modes": [
+      "binary",
+      "prior",
+      "target",
+      "posterior",
+      "prior_delta",
+      "target_delta",
+      "posterior_delta"
+    ],
+    "features": [
+      "local-radius Gaussian codebook prior",
+      "row-normalized target likelihood",
+      "fixed-prior delta logits",
+      "optional joint marginal magnitude/sign initialization"
+    ]
+  },
+  "representative_ablation": {
+    "scope": "layers 0,7,14,35; first 8192 vectors per tensor",
+    "steps": 100,
+    "lr": 0.12,
+    "results": [
+      {"config": "target_delta_joint_c3_n1_t1", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.854227684818e-05, "relative_reduction": 0.03701859, "improved_chunks": 18, "chunks": 18},
+      {"config": "target_delta_c3_n1_t1", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.858251375276e-05, "relative_reduction": 0.03566104, "improved_chunks": 15, "chunks": 18},
+      {"config": "posterior_delta_c3_n1_t1_pw025", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.859090000129e-05, "relative_reduction": 0.03537810, "improved_chunks": 15, "chunks": 18},
+      {"config": "binary_c2_t1", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.863968282125e-05, "relative_reduction": 0.03373223, "improved_chunks": 18, "chunks": 18},
+      {"config": "posterior_delta_c3_n1_t1", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.864696368003e-05, "relative_reduction": 0.03348658, "improved_chunks": 15, "chunks": 18},
+      {"config": "posterior_c3_n1_t1", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.866965011587e-05, "relative_reduction": 0.03272117, "improved_chunks": 18, "chunks": 18},
+      {"config": "target_delta_c4_n1_t2", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.875042633200e-05, "relative_reduction": 0.02999588, "improved_chunks": 14, "chunks": 18},
+      {"config": "target_delta_c5_n2_t2", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.879157470185e-05, "relative_reduction": 0.02860758, "improved_chunks": 14, "chunks": 18},
+      {"config": "posterior_c8_n4_t4", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.885660908052e-05, "relative_reduction": 0.02641340, "improved_chunks": 17, "chunks": 18},
+      {"config": "posterior_delta_joint_c3_n1_t1", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.886869050498e-05, "relative_reduction": 0.02600579, "improved_chunks": 18, "chunks": 18},
+      {"config": "posterior_delta_c8_n4_t4", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.886922109408e-05, "relative_reduction": 0.02598789, "improved_chunks": 14, "chunks": 18},
+      {"config": "binary_c8_n4_t4", "initial_mse": 2.963948888161e-05, "accepted_mse": 2.957790674271e-05, "relative_reduction": 0.00207771, "improved_chunks": 7, "chunks": 18}
+    ]
+  },
+  "full_reconstruction": {
+    "config": "target_delta_joint_c3_n1_t1_s800",
+    "scope": "all 45 GGUF IQuant tensors below 4 bits per weight",
+    "steps": 800,
+    "lr": 0.12,
+    "candidate_count": 3,
+    "neighbor_candidates": 1,
+    "target_candidates": 1,
+    "init_mode": "target_delta",
+    "joint_init": true,
+    "initial_mse": 2.310157283154e-05,
+    "accepted_mse": 2.247843325782e-05,
+    "relative_reduction": 0.026974
+  },
+  "kl": [
+    {
+      "dataset": "wikitext/wikitext-2-raw-v1",
+      "split": "test",
+      "num_sequences": 64,
+      "seq_len": 256,
+      "tokens": 16320,
+      "seed": 0,
+      "baseline_kl_nats_per_token": 0.5103524778403488,
+      "candidate_kl_nats_per_token": 0.5270142961950863,
+      "kl_abs_delta_baseline_minus_candidate": -0.016661818354737568,
+      "kl_rel_delta": -0.0326476681865936
+    },
+    {
+      "dataset": "wikitext/wikitext-2-raw-v1",
+      "split": "test",
+      "num_sequences": 128,
+      "seq_len": 256,
+      "tokens": 32640,
+      "seed": 1,
+      "baseline_kl_nats_per_token": 0.49739266213248756,
+      "candidate_kl_nats_per_token": 0.518081332655514,
+      "kl_abs_delta_baseline_minus_candidate": -0.020688670523026476,
+      "kl_rel_delta": -0.04159424152806612
+    }
+  ],
+  "conclusion": "Normalized initialization improves fixed-scale IQuant reconstruction but worsens dense-reference KL more than the prior binary-initialized patched GGUF."
+}
