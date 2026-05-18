@@ -1,5 +1,5 @@
 # Production config — Qwen3.5-122B-A10B (MoE)
-# Uses paths relative to the working directory; set SCRATCH in the environment on HPC for large-artifact layout.
+# Uses paths relative to the working directory; set GSQ_RUNTIME in .env/shell if artifacts should leave the repo (see scripts/_common.sh).
 #
 # Model: Qwen/Qwen3.5-122B-A10B  (model_type: qwen3_5_moe)
 #   Architecture (same family as Qwen3.5-35B-A3B, confirmed by model card):
@@ -15,11 +15,11 @@
 #   Aim for ~16–32 experts/GPU.
 #
 # Scratch layout:
-#   With SCRATCH set (e.g. by scripts/run.sbatch.sh), artifacts also use runtime/gsq/
+#   With GSQ_RUNTIME set, YAML may use paths like "${GSQ_RUNTIME}/checkpoints/...", "${GSQ_RUNTIME}/logs/...", etc. (expandvars in load_config).
+#   Typical layout under <repo>/runtime (default GSQ_RUNTIME)
 #     .hf/                              ← HF_HOME  (set in gsq.toml)
-#     gsq/
-#       checkpoints/qwen35-122b/        ← per-layer .safetensors shards
-#       logs/qwen35-122b/               ← Python training logs
+#     checkpoints/qwen35-122b/        ← per-layer .safetensors shards
+#     logs/qwen35-122b/               ← Python training logs
 
 model:
   name: "Qwen/Qwen3.5-122B-A10B"

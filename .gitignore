@@ -55,4 +55,5 @@ cache/
 # Secrets
 .env
 .env.*
+!.env.example
 venv*

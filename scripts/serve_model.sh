@@ -38,17 +38,22 @@ EVAL_LIMIT="${EVAL_LIMIT:-}"
 EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-}"
 EVAL_WANDB_FLAG="${EVAL_WANDB_FLAG:-}"
 
+# Checkpoint roots for RUN_ID lookups: flattened layout plus legacy runtime/gsq/... dirs.
+_GSQ_CKPT_SEARCH_ROOTS=(
+    "${GSQ_RUNTIME}/checkpoints"
+    "${REPO_ROOT}/runtime/checkpoints"
+    "${GSQ_RUNTIME}/gsq/checkpoints"
+    "${REPO_ROOT}/runtime/gsq/checkpoints"
+)
+
 # Resolve MODEL_PATH from RUN_ID if needed.
-# Search both ${SCRATCH}/gsq/checkpoints (legacy / user-overridden SCRATCH) and
-# ${REPO_ROOT}/runtime/gsq/checkpoints (config default). The user's SCRATCH may
-# point outside the repo; assembled checkpoints live in the repo by config.
 if [[ -z "${MODEL_PATH}" ]]; then
     if [[ -z "${RUN_ID}" ]]; then
         echo "ERROR: set MODEL_PATH or RUN_ID before running." >&2
         exit 1
     fi
     CANDIDATE_DIR=""
-    for SEARCH_ROOT in "${SCRATCH}/gsq/checkpoints" "${REPO_ROOT}/runtime/gsq/checkpoints"; do
+    for SEARCH_ROOT in "${_GSQ_CKPT_SEARCH_ROOTS[@]}"; do
         [[ -d "${SEARCH_ROOT}" ]] || continue
         FOUND=$(find "${SEARCH_ROOT}" -type d -path "*/${RUN_ID}/assembled" -print -quit 2>/dev/null)
         if [[ -n "${FOUND}" && -d "${FOUND}" ]]; then
@@ -58,7 +63,7 @@ if [[ -z "${MODEL_PATH}" ]]; then
     done
     if [[ -z "${CANDIDATE_DIR}" ]]; then
         echo "ERROR: no assembled model found for RUN_ID=${RUN_ID}" >&2
-        echo "       searched: ${SCRATCH}/gsq/checkpoints, ${REPO_ROOT}/runtime/gsq/checkpoints" >&2
+        printf '       searched: %s\n' "${_GSQ_CKPT_SEARCH_ROOTS[@]}" >&2
         exit 1
     fi
     MODEL_PATH="${CANDIDATE_DIR}"
@@ -116,13 +121,10 @@ if [[ -n "${TP_CLAMPED}" && "${TP_CLAMPED}" != "${TP_SIZE}" ]]; then
     fi
 fi
 
-# Resolve WANDB_RUN_ID (so eval can resume the same WandB run). Same dual-root,
-# pipefail-safe lookup as MODEL_PATH above. ${SCRATCH} may legitimately point
-# outside the repo (user-controlled), in which case the find on a non-existent
-# path would exit non-zero and trip pipefail+set -e, silently killing the script.
+# Resolve WANDB_RUN_ID (so eval can resume the same WandB run). Same checkpoint roots as MODEL_PATH.
 if [[ -z "${WANDB_RUN_ID:-}" && -n "${RUN_ID}" ]]; then
     PROGRESS_JSON=""
-    for SEARCH_ROOT in "${SCRATCH}/gsq/checkpoints" "${REPO_ROOT}/runtime/gsq/checkpoints"; do
+    for SEARCH_ROOT in "${_GSQ_CKPT_SEARCH_ROOTS[@]}"; do
         [[ -d "${SEARCH_ROOT}" ]] || continue
         FOUND=$(find "${SEARCH_ROOT}" -path "*/${RUN_ID}/progress.json" -print -quit 2>/dev/null)
         if [[ -n "${FOUND}" && -f "${FOUND}" ]]; then
@@ -160,8 +162,7 @@ echo "=========================================="
 # Hopper / Ampere advisory check.
 # vLLM's compressed-tensors WNA16 fused MoE has no Marlin kernel on Ada
 # (sm_89, L40 / L40S / RTX 4090) and falls back to a Triton path that has
-# crashed during profile_run on our setup. See
-# research_logs/knowledge/04-hopper-ampere-required-for-serve.md
+# crashed during profile_run on our setup.
 # Warn loudly but do NOT abort: dense / non-WNA16 cases may still work,
 # and the kernel coverage is expected to improve in newer vLLM tags.
 python - <<'PY' || true
@@ -194,10 +195,10 @@ PY
 cd "${REPO_ROOT}"
 
 # Sensible local cache locations to keep Triton/Inductor off the home filesystem.
-export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${SCRATCH}/.triton_cache}"
-export TRITON_HOME="${TRITON_HOME:-${SCRATCH}/.triton}"
-export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${SCRATCH}/.inductor_cache}"
-export TMPDIR="${TMPDIR:-${SCRATCH}/.tmp}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${GSQ_RUNTIME}/.triton_cache}"
+export TRITON_HOME="${TRITON_HOME:-${GSQ_RUNTIME}/.triton}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${GSQ_RUNTIME}/.inductor_cache}"
+export TMPDIR="${TMPDIR:-${GSQ_RUNTIME}/.tmp}"
 mkdir -p "${TRITON_CACHE_DIR}" "${TRITON_HOME}" "${TORCHINDUCTOR_CACHE_DIR}" "${TMPDIR}"
 
 # Persist vLLM stdout/stderr next to the model so failures are debuggable

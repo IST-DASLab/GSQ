@@ -1,5 +1,5 @@
 # Production config — Qwen3-235B-A22B (MoE)
-# Uses paths relative to the working directory; set SCRATCH in the environment on HPC for large-artifact layout.
+# Uses paths relative to the working directory; set GSQ_RUNTIME in .env/shell if artifacts should leave the repo (see scripts/_common.sh).
 #
 # Model: Qwen/Qwen3-235B-A22B
 #   - 128 routed experts, 8 active per token
@@ -12,11 +12,11 @@
 #   8 nodes (32 GPUs) —  4 experts/GPU, ~6h  for 94 layers
 #
 # Scratch layout:
-#   With SCRATCH set (e.g. by scripts/run.sbatch.sh), artifacts also use runtime/gsq/
+#   With GSQ_RUNTIME set, YAML may use paths like "${GSQ_RUNTIME}/checkpoints/...", "${GSQ_RUNTIME}/logs/...", etc. (expandvars in load_config).
+#   Typical layout under <repo>/runtime (default GSQ_RUNTIME)
 #     .hf/                         ← HF_HOME  (set in gsq.toml)
-#     gsq/
-#       checkpoints/qwen3-235b/    ← per-layer .safetensors shards (active run)
-#       logs/qwen3-235b/           ← Python training logs
+#     checkpoints/qwen3-235b/    ← per-layer .safetensors shards (active run)
+#     logs/qwen3-235b/           ← Python training logs
 
 model:
   name: "Qwen/Qwen3-235B-A22B"

@@ -8,9 +8,10 @@ a real `HummingLayer`, runs a forward pass on the GPU, and checks the kernel
 output matches `x @ W_deq.T` in bf16 tolerance.
 
 Run:
-    . ~/local/venvs/main/bin/activate
-    cd /nfs/scistore19/alistgrp/mhelcig/repos/sandbox/GSQ
+    source .venv/bin/activate            # or your env
     python tests/test_humming_pack.py
+
+If JIT fails to find CUDA libs, set CUDA_HOME (see `.env.example`) and PATH.
 """
 
 from __future__ import annotations

@@ -29,12 +29,12 @@ MASTER_PORT="${MASTER_PORT:-29500}"
 [[ "${CONFIG_FILE}" != /* ]] && CONFIG_FILE="${REPO_ROOT}/${CONFIG_FILE}"
 
 if [[ "${SMOKE_TEST}" = "1" ]]; then
-    SMOKE_DIR="${SCRATCH}/gsq/smoke/$$"
+    SMOKE_DIR="${GSQ_RUNTIME}/smoke/$$"
     mkdir -p "${SMOKE_DIR}"
     SMOKE_TEMPLATE="${REPO_ROOT}/configs/config_smoke.yaml"
     if [[ -f "${SMOKE_TEMPLATE}" ]]; then
         SMOKE_CONFIG="${SMOKE_DIR}/config_smoke.yaml"
-        SLURM_JOB_ID="${SLURM_JOB_ID:-$$}" envsubst '${SCRATCH} ${SLURM_JOB_ID}' \
+        SLURM_JOB_ID="${SLURM_JOB_ID:-$$}" envsubst '${GSQ_RUNTIME} ${SLURM_JOB_ID}' \
             < "${SMOKE_TEMPLATE}" > "${SMOKE_CONFIG}"
         CONFIG_FILE="${SMOKE_CONFIG}"
     fi

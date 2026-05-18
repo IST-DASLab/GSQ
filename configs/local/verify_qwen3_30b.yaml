@@ -30,8 +30,8 @@ training:
   lr1: 0.0002
   lr2: 0.0001
   weight_decay: 1.0
-  checkpoint_dir: "runtime/gsq/checkpoints/verify-qwen3-30b"
-  log_dir: "runtime/gsq/logs/verify-qwen3-30b"
+  checkpoint_dir: "runtime/checkpoints/verify-qwen3-30b"
+  log_dir: "runtime/logs/verify-qwen3-30b"
   act_cache_dir: "runtime/cache/act_cache_verify_qwen3"
   eval_baseline: false
   ppl_eval_every_n_layers: 0

@@ -16,8 +16,8 @@ set -euo pipefail
 source "$(dirname "$0")/_common.sh"
 
 SKIP_LARGE_MODELS="${SKIP_LARGE_MODELS:-0}"
-MODELS_DIR="${MODELS_DIR:-${SCRATCH}/gsq/models}"
-export HF_HOME="${HF_HOME:-${SCRATCH}/.hf}"
+MODELS_DIR="${MODELS_DIR:-${GSQ_RUNTIME}/models}"
+export HF_HOME="${HF_HOME:-${GSQ_RUNTIME}/.hf}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 
 if [[ -z "${HF_TOKEN:-}" ]]; then

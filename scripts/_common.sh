@@ -2,16 +2,23 @@
 # Source from any scripts/*.sh after `set -euo pipefail`.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRATCH="${SCRATCH:-${REPO_ROOT}/runtime}"
+
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "${REPO_ROOT}/.env"
+    set +a
+fi
+
+# GSQ artifact root only — do not use machine-wide SCRATCH here (often set on HPC to a quota path).
+GSQ_RUNTIME="${GSQ_RUNTIME:-${REPO_ROOT}/runtime}"
+export GSQ_RUNTIME
 VENV_PATH="${VENV_PATH:-${REPO_ROOT}/.venv}"
 
-
-# HuggingFace cache: use the user's private beegfs cache as the single source
-# of truth. Anything missing will be downloaded on first use. Bigger pre-built
-# assets (e.g. Kimi-K2.5) can be hand-copied in from the shared cluster cache.
-export HF_HOME="${HF_HOME:-/mnt/beegfs/alistgrp/stabesh/.cache/huggingface}"
+# HuggingFace hub/datasets root. Override via `.env` or the shell when using a cluster cache.
+export HF_HOME="${HF_HOME:-${HOME}/.cache/huggingface}"
 mkdir -p "${HF_HOME}/hub" "${HF_HOME}/datasets" "${HF_HOME}/xet" 2>/dev/null || true
-
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 
 if [[ -d "${VENV_PATH}" ]]; then
     # shellcheck disable=SC1091
@@ -19,13 +26,6 @@ if [[ -d "${VENV_PATH}" ]]; then
 else
     echo "WARNING: venv not found at ${VENV_PATH} — falling back to system python." >&2
     echo "         Run 'bash scripts/setup_env.sh' to create one." >&2
-fi
-
-if [[ -f "${REPO_ROOT}/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    . "${REPO_ROOT}/.env"
-    set +a
 fi
 
 ulimit -c 0

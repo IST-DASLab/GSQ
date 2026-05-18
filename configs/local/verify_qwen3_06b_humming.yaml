@@ -31,8 +31,8 @@ training:
   lr1: 0.0002
   lr2: 0.0001
   weight_decay: 1.0
-  checkpoint_dir: "/nfs/scistore19/alistgrp/mhelcig/tmp/gsq_humming_smoke/checkpoints"
-  log_dir: "/nfs/scistore19/alistgrp/mhelcig/tmp/gsq_humming_smoke/logs"
+  checkpoint_dir: "runtime/checkpoints/verify-qwen3-06b-humming"
+  log_dir: "runtime/logs/verify-qwen3-06b-humming"
   eval_baseline: false
   ppl_eval_every_n_layers: 0
 

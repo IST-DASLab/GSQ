@@ -158,9 +158,37 @@ _FIELD_TO_DATACLASS = {
 }
 
 
+def _expand_placeholders(tree):
+    if isinstance(tree, str):
+        return os.path.expandvars(tree)
+    if isinstance(tree, dict):
+        return {k: _expand_placeholders(v) for k, v in tree.items()}
+    if isinstance(tree, list):
+        return [_expand_placeholders(v) for v in tree]
+    return tree
+
+
+def _apply_env_overrides(cfg):
+    if "GSQ_MODEL_NAME" in os.environ:
+        cfg.model.name = os.path.expandvars(os.environ["GSQ_MODEL_NAME"])
+    if "GSQ_CHECKPOINT_DIR" in os.environ:
+        cfg.training.checkpoint_dir = os.path.expandvars(os.environ["GSQ_CHECKPOINT_DIR"])
+    if "GSQ_LOG_DIR" in os.environ:
+        cfg.training.log_dir = os.path.expandvars(os.environ["GSQ_LOG_DIR"])
+    if "GSQ_ACT_CACHE_DIR" in os.environ:
+        cfg.training.act_cache_dir = os.path.expandvars(os.environ["GSQ_ACT_CACHE_DIR"])
+    if "WANDB_PROJECT" in os.environ:
+        cfg.wandb.project = os.path.expandvars(os.environ["WANDB_PROJECT"])
+    elif not cfg.wandb.project.strip():
+        cfg.wandb.project = "gsq"
+    if "WANDB_ENTITY" in os.environ:
+        cfg.wandb.entity = os.path.expandvars(os.environ["WANDB_ENTITY"])
+
+
 def load_config(path):
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
+    raw = _expand_placeholders(raw)
 
     if not isinstance(raw, dict):
         raise TypeError(f"Expected top-level YAML mapping, got {type(raw).__name__}")
@@ -184,9 +212,6 @@ def load_config(path):
 
     cfg = GSQConfig(**kwargs)
 
-    if not cfg.wandb.project:
-        cfg.wandb.project = os.environ.get("WANDB_PROJECT", "gsq")
-    if not cfg.wandb.entity:
-        cfg.wandb.entity = os.environ.get("WANDB_ENTITY", "")
+    _apply_env_overrides(cfg)
 
     return cfg

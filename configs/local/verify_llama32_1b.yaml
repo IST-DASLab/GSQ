@@ -30,8 +30,8 @@ training:
   lr1: 0.0002
   lr2: 0.0001
   weight_decay: 1.0
-  checkpoint_dir: "runtime/gsq/checkpoints/verify-llama32-1b"
-  log_dir: "runtime/gsq/logs/verify-llama32-1b"
+  checkpoint_dir: "runtime/checkpoints/verify-llama32-1b"
+  log_dir: "runtime/logs/verify-llama32-1b"
   eval_baseline: false
   ppl_eval_every_n_layers: 0
 

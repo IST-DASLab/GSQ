@@ -1,14 +1,14 @@
 # Production config — Kimi-K2.5
-# Uses paths relative to the working directory; set SCRATCH in the environment on HPC for large-artifact layout.
+# Uses paths relative to the working directory; set GSQ_RUNTIME in .env/shell if artifacts should leave the repo (see scripts/_common.sh).
 #
 # Scratch layout:
-#   With SCRATCH set (e.g. by scripts/run.sbatch.sh), artifacts also use runtime/gsq/
+#   With GSQ_RUNTIME set, YAML may use paths like "${GSQ_RUNTIME}/checkpoints/...", "${GSQ_RUNTIME}/logs/...", etc. (expandvars in load_config).
+#   Typical layout under <repo>/runtime (default GSQ_RUNTIME)
 #     .hf/                         ← HF_HOME  (set in gsq.toml)
 #     models/
 #       Kimi-K2.5/         ← local model clone (code + weights)
-#     gsq/
-#       checkpoints/kimi-k2.5/  ← per-layer .safetensors shards (active run)
-#       logs/kimi-k2.5/         ← Python training logs
+#     checkpoints/kimi-k2.5/  ← per-layer .safetensors shards (active run)
+#     logs/kimi-k2.5/         ← Python training logs
 
 model:
   name: "moonshotai/Kimi-K2.5"

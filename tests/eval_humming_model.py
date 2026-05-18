@@ -15,9 +15,8 @@ Tests:
   - Wikitext-2 PPL on a small slice for both models.
 
 Usage:
-    . ~/local/venvs/main/bin/activate
-    export CUDA_HOME=/localhome/mhelcig/venvs/main/lib/python3.12/site-packages/nvidia/cu13
-    export PATH=$CUDA_HOME/bin:$PATH
+    source .venv/bin/activate
+    export CUDA_HOME=... ; export PATH=$CUDA_HOME/bin:$PATH   # if needed; see `.env.example`
 
     python tests/eval_humming_model.py \
         --ct-dir      /path/to/assembled-ct \

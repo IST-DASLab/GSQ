@@ -30,7 +30,6 @@ Verification:
 
 Usage:
     . ~/local/venvs/main/bin/activate
-    export CUDA_HOME=/localhome/mhelcig/venvs/main/lib/python3.12/site-packages/nvidia/cu13
     export PATH=$CUDA_HOME/bin:$PATH
 
     # Convert + write a new checkpoint dir:

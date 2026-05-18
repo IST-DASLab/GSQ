@@ -122,6 +122,7 @@ Then clone and run the setup script:
 ```bash
 git clone https://github.com/IST-DASLab/GSQ.git
 cd GSQ
+cp .env.example .env   # optional template; add HF_TOKEN before gated models / WandB
 bash scripts/setup_env.sh        # uv sync + flash-attn + import sanity check
 ```
 
@@ -174,7 +175,7 @@ For multi-node MoE runs (Kimi, Qwen-MoE), set the standard PyTorch distributed e
 
 ### Per-model recipes
 
-The bare-metal entry scripts live under [`scripts/`](scripts/) and are wrappers around `main.py` / `save_model.py` / `eval_model.py`. They activate the local venv (`./.venv` by default), source `.env`, and launch via `torchrun --standalone --nproc-per-node=$(visible GPUs)`.
+The bare-metal entry scripts live under [`scripts/`](scripts/) and are wrappers around `main.py` / `save_model.py` / `eval_model.py`. They activate the local venv (`./.venv` by default), load `.env` through [`scripts/_common.sh`](scripts/_common.sh), and launch via `torchrun --standalone --nproc-per-node=$(visible GPUs)`.
 
 | Model                                | Config                                                          | Command                                                                   | Approx GPUs                                              |
 |---|---|---|---|
@@ -233,13 +234,32 @@ The knobs that meaningfully change a run:
 | `bash scripts/eval_model.sh`    | Run lm-eval benchmarks against a running vLLM server            |
 | `bash scripts/verify_setup.sh`  | Sanity-check the environment + a tiny multi-GPU all-reduce      |
 
-All scripts read knobs from environment variables (e.g. `CONFIG_FILE`, `RUN_ID`, `MODEL_PATH`, `VLLM_URL`, `NPROC`, `SCRATCH`) and forward unknown CLI args to the underlying Python entry point.
+All scripts read knobs from environment variables (e.g. `CONFIG_FILE`, `RUN_ID`, `MODEL_PATH`, `VLLM_URL`, `NPROC`, `GSQ_RUNTIME`) and forward unknown CLI args to the underlying Python entry point.
 
 ---
 
 ## Configuration Reference
 
-All training parameters are controlled via a single YAML file. Configs are loaded with strict validation (`src.config.load_config`): unknown top-level sections or unknown keys within a section raise an error. Omitted keys use defaults (see `src/config.py` or the commented defaults in `configs/kimi-k2.5/kimi_k2.5_2bit_gptq_gsq.yaml`). The default config path is `configs/local/config.yaml`:
+All training parameters are controlled via a single YAML file. Configs are loaded with strict validation (`src.config.load_config`): unknown top-level sections or unknown keys within a section raise an error. Omitted keys use defaults (see `src/config.py` or the commented defaults in `configs/kimi-k2.5/kimi_k2.5_2bit_gptq_gsq.yaml`).
+
+After loading, **every string value** in the parsed YAML tree is passed through **`os.path.expandvars`**, so you can write POSIX-style substitutions such as `$HOME/...`, `${GSQ_RUNTIME}/checkpoints/...`, or `${SLURM_JOB_ID}` anywhere in the tree (paths, model IDs, nested strings). Undefined variables expand to empty, like POSIX shells. **`scripts/_common.sh` exports `GSQ_RUNTIME`** (defaults to `<repo>/runtime`; **not** the machine `SCRATCH` many clusters set) before launching Python, so `${GSQ_RUNTIME}/...` resolves when you use `scripts/run.sh`. Your site-wide `SCRATCH` is left untouched for other tools.
+
+Separately, the following environment variables override the merged config (**env wins over YAML**) when present, including entries from `.env` read by **`load_dotenv()`** / `_common.sh`:
+
+| Variable | Effect |
+|---------|--------|
+| `GSQ_MODEL_NAME` | Overrides `model.name`. |
+| `GSQ_CHECKPOINT_DIR` | Overrides `training.checkpoint_dir`. |
+| `GSQ_LOG_DIR` | Overrides `training.log_dir`. |
+| `GSQ_ACT_CACHE_DIR` | Overrides `training.act_cache_dir`. |
+| `WANDB_PROJECT` | Overrides `wandb.project` (if omitted in YAML **and** not set here, default is `gsq`). |
+| `WANDB_ENTITY` | Overrides `wandb.entity`. |
+
+There is **no** `GSQ_RUNTIME` column above on purpose: it is not patched into the dataclass. Set **`GSQ_RUNTIME`** in **`_common.sh` / `.env` / shell** whenever you launch so **`${GSQ_RUNTIME}/...` placeholders in YAML expand** (`expandvars`). Artifacts typically live under `${GSQ_RUNTIME}/checkpoints`, `${GSQ_RUNTIME}/logs`, `${GSQ_RUNTIME}/models`, etc. — **not** under an extra `gsq/` directory. It stays separate from the cluster **`SCRATCH`** variable — GSQ scripts no longer export or redefine `SCRATCH`.
+
+Values for these overrides are also run through **`expandvars`**, so `$VAR` substitutions work there too.
+
+The default config path is `configs/local/config.yaml`:
 
 ```yaml
 model:
@@ -292,20 +312,43 @@ gptq:
 wandb: true   # or use mapping form: { enabled: true, project: "gsq", entity: "" }
 ```
 
-If `wandb.project` or `wandb.entity` are omitted (or empty in the mapping form), they fall back to the `WANDB_PROJECT` and `WANDB_ENTITY` environment variables; project defaults to `"gsq"` when both are unset.
+If `WANDB_PROJECT` or `WANDB_ENTITY` appears in the process environment **at config load**, it **overrides** any `wandb.project` / `wandb.entity` from YAML; if YAML leaves `wandb.project` empty **and** `WANDB_PROJECT` is unset, the project defaults to `"gsq"`.
 
 ### Environment Variables
 
-Create a `.env` file in the project root (it is gitignored):
+Copy the template ([`.env.example`](.env.example)); the real `.env` is gitignored:
+
+```bash
+cp .env.example .env
+```
+
+Common keys:
 
 ```bash
 HF_TOKEN=your_huggingface_token         # required for gated models
-WANDB_API_KEY=your_wandb_api_key        # required if wandb: true
-WANDB_ENTITY=your_wandb_entity          # optional; fallback when wandb.entity not set in config
-WANDB_PROJECT=your_wandb_project        # optional; fallback when wandb.project not set (default: gsq)
+WANDB_API_KEY=your_wandb_api_key        # required if wandb: true in YAML
+WANDB_ENTITY=your_wandb_entity          # overrides wandb.entity in YAML when set in env
+WANDB_PROJECT=your_wandb_project        # overrides wandb.project in YAML when set; else default for empty YAML is gsq
+
+# Optional — cluster / large-model layouts (see .env.example):
+# HF_HOME=...                           # default: ~/.cache/huggingface
+# HF_DATASETS_CACHE=...                 # default: ${HF_HOME}/datasets
+# SCRATCH=/path/cluster-scratch                     # unrelated; GSQ scripts do not mutate it
+
+# ----- GSQ artifact directory (exported by scripts/_common.sh; YAML can use "${GSQ_RUNTIME}/...")
+# Overrides default ${REPO_ROOT}/runtime. Not the cluster-wide SCRATCH name.
+# GSQ_RUNTIME=/path/to/gsq-artifacts
+# HF_HUB_OFFLINE=0
+# CUDA_HOME=...                         # optional; builds and some CUDA tooling paths
+
+# Overrides YAML (`load_config`; same names as GSQ_* in Configuration Reference):
+# GSQ_MODEL_NAME=...
+# GSQ_CHECKPOINT_DIR=...
+# GSQ_LOG_DIR=...
+# GSQ_ACT_CACHE_DIR=...
 ```
 
-The `.env` file is loaded automatically at startup via `python-dotenv`. Distributed training variables (`WORLD_SIZE`, `RANK`, `LOCAL_RANK`) are set automatically by `torchrun` / Slurm.
+[`scripts/_common.sh`](scripts/_common.sh) loads `.env` **before** applying defaults, so anything you set there wins over the portable defaults above. For `uv run python main.py` (or plain `python main.py`) without `scripts/run.sh`, [`main.py`](main.py) also calls `python-dotenv`'s `load_dotenv()` so the same file is read. Distributed variables (`WORLD_SIZE`, `RANK`, `LOCAL_RANK`) are set by `torchrun` or your multi-node launcher, not by `.env`.
 
 ---
 
@@ -505,7 +548,7 @@ For MoE models, the checkpoint format is per-expert and can be resumed with a di
 
 ## Experiment Tracking (WandB)
 
-Set `wandb: true` in your config (e.g. `configs/local/config.yaml`). You can set `wandb.project` and `wandb.entity` in the config (using the mapping form `wandb: { enabled: true, project: "gsq", entity: "myteam" }`); if omitted, the code uses the `WANDB_PROJECT` and `WANDB_ENTITY` environment variables from `.env` (project defaults to `"gsq"` when unset).
+Set `wandb: true` in your config (e.g. `configs/local/config.yaml`). You can set `wandb.project` and `wandb.entity` in YAML (mapping form `wandb: { enabled: true, project: "gsq", entity: "myteam" }`). At **`load_config`**, if `WANDB_PROJECT` or `WANDB_ENTITY` exists in the process environment **(including `.env` via `python-dotenv` / `_common.sh`)**, it overrides the YAML value; if YAML leaves `project` empty **and** `WANDB_PROJECT` is unset, the project defaults to `"gsq"`.
 
 ### Logged Metrics
 

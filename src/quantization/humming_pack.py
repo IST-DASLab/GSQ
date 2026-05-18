@@ -25,7 +25,7 @@ container (e.g. 2-bit Gumbel quantizer with 4 levels {-2,-1,0,1} can be stored
 in a 4-bit CT container). We infer the effective bit width from the actual
 code range and emit Humming weights at that effective width.
 
-Reference: /nfs/scistore19/alistgrp/mhelcig/repos/slq-release/src/quant/humming_pack.py
+Upstream Humming packing logic was adapted from an internal sibling repo; cite this file for GSQ specifics.
 """
 
 from __future__ import annotations
@@ -42,9 +42,8 @@ def _check_humming_importable() -> None:
         from humming.schema.humming import HummingWeightSchema  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "humming is required for this packer. Install from "
-            "/nfs/scistore19/alistgrp/mhelcig/repos/lossless-lm/humming "
-            "(uv pip install -e .)"
+            "humming is required for this packer. Install your checkout (e.g. "
+            "`uv pip install -e /path/to/humming`). See `.env.example` for optional CUDA_HOME."
         ) from e
 
 
