@@ -1,6 +1,8 @@
 # GSQ: Gumbel-Softmax Quantization for LLMs
 
 [![arXiv](https://img.shields.io/badge/arXiv-2604.18556-b31b1b.svg)](https://arxiv.org/abs/2604.18556)
+[![Hugging Face – paper](https://img.shields.io/badge/Hugging%20Face-Paper-FFD21E?logo=huggingface&logoColor=black)](https://huggingface.co/papers/2604.18556)
+[![Hugging Face – GSQ models](https://img.shields.io/badge/Hugging%20Face-GSQ%20collection-FFD21E?logo=huggingface&logoColor=black)](https://hf.co/collections/ISTA-DASLab/gsq)
 
 **Paper:** *GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling* (preprint)
 **Authors:** Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, Dan Alistarh — ISTA / ETH Zürich / TU Wien / Red Hat AI
