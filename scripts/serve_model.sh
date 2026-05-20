@@ -74,47 +74,63 @@ if [[ ! -d "${MODEL_PATH}" ]]; then
 fi
 [[ -z "${EVAL_OUTPUT_DIR}" ]] && EVAL_OUTPUT_DIR="${MODEL_PATH}/evals"
 
-# vLLM's compressed-tensors WNA16 fused-MoE Marlin kernel requires
+# vLLM requires num_attention_heads (and num_key_value_heads when present) divisible
+# by TP. Compressed-tensors WNA16 fused-MoE Marlin additionally requires
 # (moe_intermediate_size / TP) % max(64, group_size) == 0 and
 # group_size in {-1, 32, 64, 128} (marlin_utils.py:check_moe_marlin_supports_layer).
-# If the check fails it silently falls back to a Triton WNA16 path that
-# either crashes inside moe_sum during profile_run (sm_89) or races on the
-# shared Triton cache on beegfs. See knowledge/05-vllm-tp-marlin-moe-shape-constraint.md
-# Clamp TP_SIZE to the largest divisor of itself that satisfies the constraint.
+# Walk TP_SIZE downward until all constraints pass.
 TP_CLAMPED=$(MODEL_PATH="${MODEL_PATH}" TP_SIZE="${TP_SIZE}" python - <<'PY'
 import json, os, sys
+
 mp = os.environ["MODEL_PATH"]
 tp = int(os.environ["TP_SIZE"])
 try:
     with open(os.path.join(mp, "config.json")) as f:
         cfg = json.load(f)
 except Exception:
-    print(tp); sys.exit(0)
-mis = cfg.get("moe_intermediate_size")
-if not mis:
-    print(tp); sys.exit(0)
+    print(tp)
+    sys.exit(0)
+
+tc = cfg.get("text_config") or cfg
+num_heads = tc.get("num_attention_heads") or cfg.get("num_attention_heads")
+num_kv = tc.get("num_key_value_heads") or cfg.get("num_key_value_heads")
+
+mis = cfg.get("moe_intermediate_size") or tc.get("moe_intermediate_size")
 gs = 128
 qc = cfg.get("quantization_config") or {}
 for g in (qc.get("config_groups") or {}).values():
     w = (g or {}).get("weights") or {}
     if isinstance(w.get("group_size"), int) and w["group_size"] > 0:
-        gs = w["group_size"]; break
-if gs not in (-1, 32, 64, 128):
-    print(tp); sys.exit(0)
-need = max(64, gs)
+        gs = w["group_size"]
+        break
+
+def tp_ok(candidate):
+    if num_heads and num_heads % candidate != 0:
+        return False
+    if num_kv and num_kv % candidate != 0:
+        return False
+    if not mis:
+        return True
+    if gs not in (-1, 32, 64, 128):
+        return True
+    if mis % candidate != 0:
+        return False
+    need = max(64, gs)
+    return (mis // candidate) % need == 0
+
 best = tp
 while best > 1:
-    if mis % best == 0 and (mis // best) % need == 0:
+    if tp_ok(best):
         break
     best -= 1
 print(best)
 PY
 )
 if [[ -n "${TP_CLAMPED}" && "${TP_CLAMPED}" != "${TP_SIZE}" ]]; then
-    echo "[gsq-serve] WARNING: clamping TP_SIZE ${TP_SIZE} -> ${TP_CLAMPED} so that" >&2
-    echo "            (moe_intermediate_size / TP) % max(64, group_size) == 0" >&2
-    echo "            (vLLM Marlin WNA16 MoE shape constraint; see" >&2
-    echo "            research_logs/knowledge/05-vllm-tp-marlin-moe-shape-constraint.md)" >&2
+    echo "[gsq-serve] WARNING: clamping TP_SIZE ${TP_SIZE} -> ${TP_CLAMPED}" >&2
+    echo "            (vLLM requires num_attention_heads % TP == 0;" >&2
+    echo "            Marlin WNA16 MoE also needs (moe_intermediate_size / TP)" >&2
+    echo "            % max(64, group_size) == 0 when applicable)" >&2
     echo "            Set TP_SIZE_FORCE=1 to skip this clamp." >&2
     if [[ "${TP_SIZE_FORCE:-0}" != "1" ]]; then
         TP_SIZE="${TP_CLAMPED}"
@@ -187,7 +203,6 @@ if bad:
         print("            compressed-tensors WNA16 fused MoE in vLLM 0.20.x:", file=sys.stderr)
         print("            it falls back from Marlin to a Triton path that", file=sys.stderr)
         print("            crashes inside moe_sum during profile_run.", file=sys.stderr)
-    print("            See research_logs/knowledge/04-hopper-ampere-required-for-serve.md", file=sys.stderr)
     print("            Proceeding anyway (warn-only).", file=sys.stderr)
     print("=" * 70, file=sys.stderr)
 PY
@@ -195,11 +210,11 @@ PY
 cd "${REPO_ROOT}"
 
 # Sensible local cache locations to keep Triton/Inductor off the home filesystem.
-export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${GSQ_RUNTIME}/.triton_cache}"
-export TRITON_HOME="${TRITON_HOME:-${GSQ_RUNTIME}/.triton}"
-export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${GSQ_RUNTIME}/.inductor_cache}"
-export TMPDIR="${TMPDIR:-${GSQ_RUNTIME}/.tmp}"
-mkdir -p "${TRITON_CACHE_DIR}" "${TRITON_HOME}" "${TORCHINDUCTOR_CACHE_DIR}" "${TMPDIR}"
+# export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${GSQ_RUNTIME}/.triton_cache}"
+# export TRITON_HOME="${TRITON_HOME:-${GSQ_RUNTIME}/.triton}"
+# export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${GSQ_RUNTIME}/.inductor_cache}"
+# export TMPDIR="${TMPDIR:-${GSQ_RUNTIME}/.tmp}"
+# mkdir -p "${TRITON_CACHE_DIR}" "${TRITON_HOME}" "${TORCHINDUCTOR_CACHE_DIR}" "${TMPDIR}"
 
 # Persist vLLM stdout/stderr next to the model so failures are debuggable
 # even when the terminal scrollback rolls (vLLM startup logs are huge).
@@ -224,8 +239,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "${EVAL}" = "1" ]]; then
+    # MoE + compressed-tensors first boot can take 60–90+ min (compile, profile_run,
+    # CUDA graphs) before /health returns 200. Uvicorn's "Application startup complete"
+    # is NOT that signal — wait on /health instead.
+    SERVE_HEALTH_POLL_SEC="${SERVE_HEALTH_POLL_SEC:-20}"
+    SERVE_HEALTH_MAX_WAIT_SEC="${SERVE_HEALTH_MAX_WAIT_SEC:-14400}"
+    export SERVE_HEALTH_MAX_WAIT_SEC
+    _HEALTH_MAX_POLLS=$(( (SERVE_HEALTH_MAX_WAIT_SEC + SERVE_HEALTH_POLL_SEC - 1) / SERVE_HEALTH_POLL_SEC ))
     HEALTH_URL="http://127.0.0.1:${PORT}/health"
-    echo "EVAL=1 — waiting for ${HEALTH_URL}..."
+    echo "EVAL=1 — waiting for ${HEALTH_URL} (up to ${SERVE_HEALTH_MAX_WAIT_SEC}s, poll every ${SERVE_HEALTH_POLL_SEC}s)..."
+    echo "       Note: vLLM may log 'Application startup complete' only after engine warmup;"
+    echo "       eval starts when GET /health returns 200."
     HEALTHY=0
     if command -v curl >/dev/null 2>&1; then
         _HEALTH_CMD=(curl -sf "${HEALTH_URL}")
@@ -234,24 +258,30 @@ if [[ "${EVAL}" = "1" ]]; then
     else
         _HEALTH_CMD=(python -c "import sys, urllib.request as u; sys.exit(0 if u.urlopen('${HEALTH_URL}', timeout=5).status==200 else 1)")
     fi
-    for i in $(seq 1 180); do
+    for i in $(seq 1 "${_HEALTH_MAX_POLLS}"); do
         if "${_HEALTH_CMD[@]}" >/dev/null 2>&1; then
-            echo "  Server healthy after ${i}*20s"
+            echo "  Server healthy after ~$(( (i - 1) * SERVE_HEALTH_POLL_SEC ))s"
             HEALTHY=1
             break
         fi
         # Bail out early if the server background process has already died
-        # (otherwise we'd loop curl-poll for a full hour for no reason).
+        # (otherwise we'd poll until the max wait for no reason).
         if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
             echo "ERROR: vLLM server pid ${SERVER_PID} exited before becoming healthy." >&2
             echo "       See ${SERVE_LOG} for details (last 40 lines):" >&2
             tail -n 40 "${SERVE_LOG}" >&2 || true
             exit 1
         fi
-        sleep 20
+        if (( i == 1 || i % 3 == 0 )); then
+            echo "  ... still waiting for /health (poll ${i}/${_HEALTH_MAX_POLLS}, ~$(( i * SERVE_HEALTH_POLL_SEC ))s elapsed)"
+        fi
+        sleep "${SERVE_HEALTH_POLL_SEC}"
     done
     if [[ "${HEALTHY}" = "0" ]]; then
-        echo "WARNING: server did not become healthy; skipping eval." >&2
+        echo "WARNING: server did not become healthy within ${SERVE_HEALTH_MAX_WAIT_SEC}s; skipping eval." >&2
+        echo "         If vLLM is still warming up, wait for /health then run eval in another shell:" >&2
+        echo "           VLLM_URL=http://127.0.0.1:${PORT}/v1/completions CONFIG_FILE=... bash scripts/eval_model.sh" >&2
+        echo "         Faster first boot: EXTRA_VLLM_ARGS='... --enforce-eager' (see run_e2e_verify.sh)." >&2
     else
         EVAL_CONFIG_PATH="${EVAL_CONFIG_FILE}"
         [[ "${EVAL_CONFIG_PATH}" != /* ]] && EVAL_CONFIG_PATH="${REPO_ROOT}/${EVAL_CONFIG_PATH}"

@@ -40,12 +40,9 @@ _pick_latest_run_id() {
     local parent="${_CKPT_PARENT[$1]:?}"
     local latest=
     latest="$(
-        {
-            find "${REPO_ROOT}/runtime/checkpoints/${parent}" \
-                -mindepth 2 -maxdepth 2 -name progress.json -printf '%T@\t%p\n' 2>/dev/null
-            find "${REPO_ROOT}/runtime/gsq/checkpoints/${parent}" \
-                -mindepth 2 -maxdepth 2 -name progress.json -printf '%T@\t%p\n' 2>/dev/null
-        } | sort -nr | head -n1 | cut -f2-
+        find "${REPO_ROOT}/runtime/checkpoints/${parent}" \
+            -mindepth 2 -maxdepth 2 -name progress.json -printf '%T@\t%p\n' 2>/dev/null \
+            | sort -nr | head -n1 | cut -f2-
     )"
     if [[ -n "${latest}" ]]; then
         basename "$(dirname "${latest}")"

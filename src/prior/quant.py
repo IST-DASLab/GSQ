@@ -101,7 +101,6 @@ class Quantizer(nn.Module):
                         scale1.unsqueeze(1),
                         zero1.unsqueeze(1),
                         self.maxq,
-                        self.format,
                     )
                     err = (q - x).abs().pow(self.norm).sum(1)
                     tmp = err < best
@@ -119,7 +118,6 @@ class Quantizer(nn.Module):
                         scale1.unsqueeze(1),
                         zero1.unsqueeze(1),
                         self.maxq,
-                        self.format,
                     )
                     err = (q - x).abs().pow(self.norm).sum(1)
 
@@ -134,8 +132,8 @@ class Quantizer(nn.Module):
                     scale1 = (xmax1 - xmin1) / self.maxq
                     zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
 
-                    q_pos = quantize(x,  scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq, self.format)
-                    q_neg = quantize(x, (-scale1).unsqueeze(1), zero1.unsqueeze(1), self.maxq, self.format)
+                    q_pos = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
+                    q_neg = quantize(x, (-scale1).unsqueeze(1), zero1.unsqueeze(1), self.maxq)
 
                     e_pos = (q_pos - x).abs().pow(self.norm).sum(1)
                     e_neg = (q_neg - x).abs().pow(self.norm).sum(1)

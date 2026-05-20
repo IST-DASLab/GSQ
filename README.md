@@ -103,13 +103,13 @@ The GSQ precision is controlled by the `quantization.gsq_bits` config key:
 
 GSQ has only been **tested on NVIDIA Hopper (H100, sm_90)**. Training itself should work on any reasonably modern CUDA GPU (we've also run training on L40S/Ada), but the **vLLM serving / lm-eval step requires Hopper or Ampere** (sm ≥ 80). On Ada (L40S, sm_89) vLLM has no Marlin kernel for compressed-tensors WNA16 fused MoE and falls back to a Triton path that crashes inside `moe_sum` during `profile_run`. `scripts/serve_model.sh` emits a warning when launched on sm < 80 or sm == 89. See [`research_logs/knowledge/04-hopper-ampere-required-for-serve.md`](research_logs/knowledge/04-hopper-ampere-required-for-serve.md) for the diagnosis. If you need to serve quantized MoE checkpoints on Ada, that is currently a vLLM-upstream gap, not a GSQ one.
 
-**TP for MoE serving.** vLLM's Marlin WNA16 MoE kernel additionally requires `(moe_intermediate_size / TP) % max(64, group_size) == 0`; otherwise vLLM silently falls back to the same broken Triton path. With the default `groupsize=128`, valid `TP_SIZE` values are:
+**TP for MoE serving.** vLLM requires `num_attention_heads % TP == 0` (and `num_key_value_heads % TP == 0` when GQA). The Marlin WNA16 MoE kernel additionally requires `(moe_intermediate_size / TP) % max(64, group_size) == 0`; otherwise vLLM silently falls back to the same broken Triton path. With the default `groupsize=128`, **effective** max TP on 8 GPUs (Marlin ∩ attention heads):
 
-| Model | `moe_intermediate_size` | Max valid TP on 8 GPUs |
-|---|---|---|
-| Qwen3-30B-A3B, Qwen3.5-35B-A3B | 768 | **6** (also 1/2/3) |
-| Qwen3-235B-A22B, Qwen3.5-122B/397B | 1536 | **6** (also 1/2/3/4) |
-| Kimi-K2 / K2.5 | 2048 | **8** (also 1/2/4) |
+| Model | `moe_intermediate_size` | `num_attention_heads` | Max valid TP on 8 GPUs |
+|---|---|---|---|
+| Qwen3-30B-A3B, Qwen3.5-35B-A3B | 768 | 32 | **2** (Marlin allows 6, but 32 % 6 ≠ 0) |
+| Qwen3-235B-A22B, Qwen3.5-122B/397B | 1536 | 64 | **4** (Marlin allows 6, but 64 % 6 ≠ 0) |
+| Kimi-K2 / K2.5 | 2048 | 64 | **8** |
 
 `scripts/serve_model.sh` auto-clamps `TP_SIZE` to the largest valid value for the assembled checkpoint's `config.json` and logs a warning when it changes the requested TP. Set `TP_SIZE_FORCE=1` to skip the clamp. See [`research_logs/knowledge/05-vllm-tp-marlin-moe-shape-constraint.md`](research_logs/knowledge/05-vllm-tp-marlin-moe-shape-constraint.md).
 
