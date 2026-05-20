@@ -7,6 +7,7 @@ completions test, then blocks until the server exits.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -77,7 +78,12 @@ def main():
     parser.add_argument("--num-nodes", type=int, required=True, help="Expected number of Ray nodes")
     parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
     parser.add_argument("--ray-wait-timeout", type=int, default=300, help="Seconds to wait for Ray cluster")
-    parser.add_argument("--health-timeout", type=int, default=900, help="Seconds to wait for /health 200")
+    parser.add_argument(
+        "--health-timeout",
+        type=int,
+        default=int(os.environ.get("SERVE_HEALTH_MAX_WAIT_SEC", "14400")),
+        help="Seconds to wait for /health 200 (default: SERVE_HEALTH_MAX_WAIT_SEC or 14400)",
+    )
     args, vllm_args = parser.parse_known_args()
     if not vllm_args:
         parser.error("vllm serve arguments required (e.g. /path/to/model --tensor-parallel-size 4)")
