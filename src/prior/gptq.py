@@ -250,9 +250,9 @@ class GPTQ:
 
             logit_params = [p for n, p in quantizer.named_parameters() if n != 'scales']
             optimizer_params.extend([
-                {'params': logit_params, 'lr': self.training.lr1,
+                {'params': logit_params, 'lr': self.config.training.lr1,
                 'weight_decay': self.config.training.weight_decay},
-                {'params': quantizer.scales, 'lr': self.training.lr2,
+                {'params': quantizer.scales, 'lr': self.config.training.lr2,
                 'weight_decay': 0.0}
             ])
 
