@@ -314,6 +314,301 @@ def mixed(tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_wo
     gpt_loader = DataLoader(gpt_split, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     return train_loader, val_loader, gpt_loader
+    
+
+def patch_qwen35_chat_template(tokenizer):
+    """
+    Qwen3.5's template supports message.reasoning_content, but may emit
+    an empty <think></think> block for non-thinking samples. This avoids
+    that for historical assistant messages.
+    """
+    tmpl = getattr(tokenizer, "chat_template", None)
+    if not tmpl:
+        return tokenizer
+
+    old = (
+        "{%- if loop.index0 > ns.last_query_index %}\n\n"
+        "{{- '<|im_start|>' + message.role + '\\n<think>\\n' "
+        "+ reasoning_content + '\\n</think>\\n\\n' + content }}\n\n"
+        "{%- else %}\n\n"
+        "{{- '<|im_start|>' + message.role + '\\n' + content }}\n\n"
+        "{%- endif %}"
+    )
+
+    new = (
+        "{%- if loop.index0 > ns.last_query_index and reasoning_content %}\n\n"
+        "{{- '<|im_start|>' + message.role + '\\n<think>\\n' "
+        "+ reasoning_content + '\\n</think>\\n\\n' + content }}\n\n"
+        "{%- else %}\n\n"
+        "{{- '<|im_start|>' + message.role + '\\n' + content }}\n\n"
+        "{%- endif %}"
+    )
+
+    if old in tmpl:
+        tokenizer.chat_template = tmpl.replace(old, new)
+    else:
+        old_compact = "{%- if loop.index0 > ns.last_query_index %}"
+        new_compact = "{%- if loop.index0 > ns.last_query_index and reasoning_content %}"
+        if old_compact in tmpl and "reasoning_content" in tmpl and "<think>" in tmpl:
+            tokenizer.chat_template = tmpl.replace(old_compact, new_compact, 1)
+
+    return tokenizer
+
+
+def patch_gemma4_chat_template(tokenizer):
+    """
+    Gemma4's template can know reasoning/reasoning_content, but the official
+    condition may be too restrictive. This relaxes the condition so reasoning
+    can be emitted for historical assistant messages.
+    """
+    tmpl = getattr(tokenizer, "chat_template", None)
+    if not tmpl:
+        return tokenizer
+
+    old = (
+        "{%- if thinking_text and loop.index0 > ns_turn.last_user_idx "
+        "and message.get('tool_calls') -%}"
+    )
+    new = "{%- if thinking_text and loop.index0 > ns_turn.last_user_idx -%}"
+
+    if old in tmpl:
+        tokenizer.chat_template = tmpl.replace(old, new)
+
+    return tokenizer
+
+def normalize_reasoning_messages(
+    example,
+    *,
+    include_system=True,
+):
+    """
+    Converts one JSONL row into chat-template-compatible messages.
+
+    Non-thinking:
+      system + user + assistant final answer
+
+    Thinking:
+      system + user + assistant with reasoning_content + final answer
+    """
+    mode = example.get("mode")
+
+    # Prefer calib_messages because they already contain assistant output.
+    source_msgs = example.get("messages") or []
+
+    messages = []
+
+    for msg in source_msgs:
+        if not isinstance(msg, dict):
+            continue
+
+        role = msg.get("role")
+        content = msg.get("content", "")
+
+        if content is None:
+            content = ""
+
+        if role == "system":
+            if include_system:
+                messages.append({"role": "system", "content": content})
+
+        elif role == "user":
+            messages.append({"role": "user", "content": content})
+
+        elif role == "assistant":
+            out = {"role": "assistant", "content": content}
+
+            reasoning = example.get("reasoning")
+            if mode == "thinking" and reasoning:
+                out["reasoning_content"] = reasoning
+
+            messages.append(out)
+
+    # Fallback if calib_messages/messages did not include assistant.
+    if not any(m["role"] == "assistant" for m in messages):
+        output = example.get("final_output") or example.get("output")
+        if not output:
+            return None
+
+        out = {"role": "assistant", "content": output}
+
+        reasoning = example.get("reasoning")
+        if mode == "thinking" and reasoning:
+            out["reasoning_content"] = reasoning
+
+        messages.append(out)
+
+    return messages
+
+
+def custom_jsonl_to_text_reasoning(
+    example,
+    tokenizer,
+    *,
+    include_system=True,
+):
+    messages = normalize_reasoning_messages(
+        example,
+        include_system=include_system,
+    )
+
+    if messages is None:
+        return {"text": None}
+
+    enable_thinking = example.get("mode") == "thinking"
+
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+        enable_thinking=enable_thinking,
+    )
+
+    return {"text": text}
+
+
+def custom_jsonl(
+    tokenizer,
+    batch_size,
+    train_samples,
+    val_samples,
+    gpt_samples,
+    num_workers,
+    max_length,
+    *,
+    model_name="qwen3.5-4b",
+    patch_tokenizer_fn=patch_qwen35_chat_template,
+    shuffle_seed=1234,
+    seed=42,
+    nonthinking_weight=1.0,
+    thinking_weight=1.0,
+    include_system=True,
+    **_kw,
+):
+    rank, world_size = _get_dist_info()
+    total_needed = train_samples + val_samples + gpt_samples
+
+    if patch_tokenizer_fn is not None:
+        tokenizer = patch_tokenizer_fn(tokenizer)
+
+    if rank == 0 or world_size <= 1:
+        ds_nt = load_dataset(
+            "json",
+            data_files="calib_nonthinking_clean.jsonl",
+            split="train",
+        )
+
+        ds_th = load_dataset(
+            "json",
+            data_files="calib_thinking_clean.jsonl",
+            split="train",
+        )
+
+        ds_nt = ds_nt.shuffle(seed=seed)
+        ds_th = ds_th.shuffle(seed=seed + 1)
+
+        def preprocess(ex):
+            return custom_jsonl_to_text_reasoning(
+                ex,
+                tokenizer,
+                include_system=include_system,
+            )
+
+        num_proc = min(8, os.cpu_count() or 1)
+
+        ds_nt = ds_nt.map(
+            preprocess,
+            remove_columns=ds_nt.column_names,
+            num_proc=num_proc,
+        ).filter(lambda x: x["text"] is not None)
+
+        print(ds_nt[0])
+
+        ds_th = ds_th.map(
+            preprocess,
+            remove_columns=ds_th.column_names,
+            num_proc=num_proc,
+        ).filter(lambda x: x["text"] is not None)
+
+        print(ds_th[0])
+
+        w_sum = nonthinking_weight + thinking_weight
+        nt_needed = int(total_needed * nonthinking_weight / w_sum)
+        th_needed = total_needed - nt_needed
+
+        nt_chunks = make_concat_chunks(
+            ds_nt,
+            tokenizer,
+            max_length,
+            nt_needed,
+            seed=shuffle_seed,
+            add_eos=True,
+        )
+
+        th_chunks = make_concat_chunks(
+            ds_th,
+            tokenizer,
+            max_length,
+            th_needed,
+            seed=shuffle_seed,
+            add_eos=True,
+        )
+
+        all_chunks = nt_chunks + th_chunks
+        random.Random(shuffle_seed).shuffle(all_chunks)
+
+        if len(all_chunks) < total_needed:
+            raise ValueError(
+                f"Only produced {len(all_chunks)} chunks, but needed {total_needed}. "
+                f"Non-thinking chunks: {len(nt_chunks)}, thinking chunks: {len(th_chunks)}."
+            )
+
+        all_chunks = all_chunks[:total_needed]
+
+        print(
+            f"Broadcasting {len(all_chunks)} custom {model_name} chunks "
+            f"to {world_size} ranks...",
+            flush=True,
+        )
+
+    else:
+        all_chunks = [torch.zeros(max_length, dtype=torch.long)]
+
+    if world_size > 1:
+        all_chunks = _broadcast_chunks(all_chunks, rank, world_size)
+
+    if rank == 0:
+        print(f"Custom {model_name} dataset ready.", flush=True)
+
+    train_tokens = all_chunks[:train_samples]
+    val_tokens = all_chunks[train_samples:train_samples + val_samples]
+    gpt_tokens = all_chunks[train_samples + val_samples:total_needed]
+
+    train_split = _maybe_shard(train_tokens)
+    val_split = _maybe_shard(val_tokens)
+    gpt_split = _maybe_shard(gpt_tokens)
+
+    train_loader = DataLoader(
+        train_split,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+
+    val_loader = DataLoader(
+        val_split,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+
+    gpt_loader = DataLoader(
+        gpt_split,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+
+    return train_loader, val_loader, gpt_loader
 
 def create_dataloader(dataset_name, tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_workers, max_length, **kwargs):
     return globals()[dataset_name](tokenizer, batch_size, train_samples, val_samples, gpt_samples, num_workers, max_length, **kwargs)
