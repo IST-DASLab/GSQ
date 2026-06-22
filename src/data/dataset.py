@@ -476,6 +476,8 @@ def custom_jsonl(
     max_length,
     *,
     model_name="qwen3.5-4b",
+    nonthinking_path="calib_nonthinking_clean.jsonl",
+    thinking_path="calib_thinking_clean.jsonl",
     patch_tokenizer_fn=patch_qwen35_chat_template,
     shuffle_seed=1234,
     seed=42,
@@ -493,13 +495,13 @@ def custom_jsonl(
     if rank == 0 or world_size <= 1:
         ds_nt = load_dataset(
             "json",
-            data_files="calib_nonthinking_clean.jsonl",
+            data_files=nonthinking_path,
             split="train",
         )
 
         ds_th = load_dataset(
             "json",
-            data_files="calib_thinking_clean.jsonl",
+            data_files=thinking_path,
             split="train",
         )
 
