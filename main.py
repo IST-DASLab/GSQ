@@ -137,14 +137,14 @@ def save_progress(run_dir, layer_idx, run_id=None, wandb_run_id=None):
 
 def create_dict(num_samples, seqlen, hidden_size, dtype, mmap_dir=None, mmap_threshold_bytes=2 * 1024 ** 3):
     nbytes = num_samples * seqlen * hidden_size * 2  # 2 bytes for any 16-bit dtype
-    if mmap_dir is not None and nbytes > mmap_threshold_bytes:
+    if mmap_dir is not None and nbytes > mmap_threshold_bytes and False:
         import numpy as np
         os.makedirs(mmap_dir, exist_ok=True)
         path = os.path.join(mmap_dir, f"act_{os.getpid()}_{num_samples}x{seqlen}x{hidden_size}.bin")
         arr = np.memmap(path, dtype='uint16', mode='w+', shape=(num_samples, seqlen, hidden_size))
         inps = torch.from_numpy(arr).view(dtype)
-        return {'input': inps, '_mmap_path': path}
-    inps = torch.zeros((num_samples, seqlen, hidden_size), dtype=dtype, device='cpu')
+    else:
+        inps = torch.zeros((num_samples, seqlen, hidden_size), dtype=dtype, device='cpu', pin_memory=True).contiguous()
     return {'input': inps}
 
 
