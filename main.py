@@ -137,7 +137,7 @@ def save_progress(run_dir, layer_idx, run_id=None, wandb_run_id=None):
 
 def create_dict(num_samples, seqlen, hidden_size, dtype, mmap_dir=None, mmap_threshold_bytes=2 * 1024 ** 3):
     nbytes = num_samples * seqlen * hidden_size * 2  # 2 bytes for any 16-bit dtype
-    if mmap_dir is not None and nbytes > mmap_threshold_bytes and False:
+    if mmap_dir is not None and nbytes > mmap_threshold_bytes:
         import numpy as np
         os.makedirs(mmap_dir, exist_ok=True)
         path = os.path.join(mmap_dir, f"act_{os.getpid()}_{num_samples}x{seqlen}x{hidden_size}.bin")
