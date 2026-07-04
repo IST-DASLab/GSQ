@@ -441,16 +441,39 @@ class BaseModelWrapper(ABC):
         if gptq_losses:
             trainer.gptq_avg_loss = sum(gptq_losses) / len(gptq_losses)
 
-    def calculate_mse(self, batch, quantized_weights, self_attn, validation=False, accumulation_steps=1):
+    def calculate_mse(
+        self,
+        batch,
+        quantized_weights,
+        self_attn,
+        validation=False,
+        accumulation_steps=1,
+        tensor_sharded=False,
+    ):
         with torch.no_grad():
             out_fp = self.forward_with_quantized(batch, None, self_attn)
-        out_q = self.forward_with_quantized(batch, quantized_weights, self_attn)
+
+        if tensor_sharded:
+            if self_attn:
+                raise NotImplementedError(
+                    "tensor-sharded attention GSQ is not implemented"
+                )
+            out_q = self.forward_sharded_mlp(batch, quantized_weights)
+        else:
+            out_q = self.forward_with_quantized(
+                batch, quantized_weights, self_attn
+            )
 
         mse = self.loss_fn(out_q, out_fp)
         if not validation:
             (mse / accumulation_steps).backward()
-
         return mse.item()
+
+    def forward_sharded_mlp(self, batch, quantized_weights):
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement "
+            "tensor-sharded MLP forward"
+        )
 
     def forward_with_quantized(self, batch, quantized_weights, self_attn):
         class LinearWeightHook:

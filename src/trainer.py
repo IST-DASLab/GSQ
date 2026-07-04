@@ -8,6 +8,7 @@ from lion_pytorch import Lion
 import torch.nn.functional as F
 import torch.distributed as dist
 from src.quantization import *
+from src.distributed import DenseMLPTensorParallel
 from src.utils.progress_reporter import report_gumbel_epoch, report_gumbel_step, report_pipeline
 
 class QuantizationTrainer:
@@ -27,6 +28,32 @@ class QuantizationTrainer:
         self.global_rank = getattr(self.model, 'rank', 0)
         self.world_size = getattr(self.model, 'world_size', 1)
         self.use_dist = self.world_size > 1
+        self.dist_mode = getattr(self.config.distributed, "mode", "data_parallel")
+        self.tensor_sharded = self.dist_mode == "tensor_sharded"
+
+        if self.tensor_sharded:
+            if not self.use_dist:
+                raise ValueError(
+                    "distributed.mode=tensor_sharded requires world_size > 1"
+                )
+            if self.model.is_moe:
+                raise ValueError("tensor_sharded mode is for dense models only")
+            if self_attn:
+                raise ValueError(
+                    "tensor_sharded mode currently supports MLP GSQ only"
+                )
+            if getattr(self.config.quantization, "gsq_bits", 2) != 2:
+                raise ValueError(
+                    "tensor_sharded mode currently supports gsq_bits=2 only"
+                )
+            self.tp = DenseMLPTensorParallel(
+                rank=self.global_rank,
+                world_size=self.world_size,
+                groupsize=self.config.quantization.groupsize,
+            )
+        else:
+            self.tp = None
+
         if hasattr(self.model, 'save_dir'):
             self.model.save_dir = config.training.checkpoint_dir
         self.train_attn = self_attn
@@ -58,9 +85,14 @@ class QuantizationTrainer:
             )
 
     def setup_layer_training(self, tensor_name, Q, scales):
+        if self.tensor_sharded:
+            Q, scales, _ = self.tp.shard_quantizer_inputs(
+                tensor_name, Q, scales
+            )
+
         quantizer = self._create_quantizer(Q, scales)
 
-        if self.use_dist and not self.model.is_moe:
+        if self.use_dist and not self.model.is_moe and not self.tensor_sharded:
             for p in quantizer.parameters():
                 dist.broadcast(p.data, src=0)
 
@@ -84,7 +116,9 @@ class QuantizationTrainer:
             return
         num_epochs = self.config.training.num_epochs
         num_samples = train_all['input'].shape[0]
-        batch_size = self.config.data.batch_size // self.world_size
+        batch_size = self.config.data.batch_size
+        if not self.tensor_sharded:
+            batch_size //= self.world_size
 
         self.optimizer = Lion(self.optimizer_params, betas=tuple(self.config.training.lion_betas))
 
@@ -230,13 +264,18 @@ class QuantizationTrainer:
             else:
                 if "gate_proj" in tensor_name:
                     base = tensor_name[: -len(".gate_proj")]
-                    pairs = {
-                        "gate_proj": quantizer.get_hard_weights(), 
-                        "up_proj": self.quantizers[f"{base}.up_proj"].get_hard_weights(),
-                        "down_proj": self.quantizers[f"{base}.down_proj"].get_hard_weights()
-                    }
-                    if self.model.is_moe or self.global_rank == 0:
-                        self.model.save_to_disc(base, pairs)
+                    if self.tensor_sharded:
+                        pairs = self._gather_hard_mlp_pairs(base)
+                        if self.global_rank == 0:
+                            self.model.save_to_disc(base, pairs)
+                    else:
+                        pairs = {
+                            "gate_proj": quantizer.get_hard_weights(),
+                            "up_proj": self.quantizers[f"{base}.up_proj"].get_hard_weights(),
+                            "down_proj": self.quantizers[f"{base}.down_proj"].get_hard_weights(),
+                        }
+                        if self.model.is_moe or self.global_rank == 0:
+                            self.model.save_to_disc(base, pairs)
 
         if logging is not None and self.global_rank == 0:
             report_pipeline(f"Finished writing layer checkpoint ({layer_name})")
@@ -272,19 +311,22 @@ class QuantizationTrainer:
                     quantized_weights[tensor_name] = quantizer.forward(temperature, scale)
 
             soft_loss = self.model.calculate_mse(
-                micro_batch.to(self.device), quantized_weights, self.train_attn,
-                accumulation_steps=accumulation_steps
+                micro_batch.to(self.device),
+                quantized_weights,
+                self.train_attn,
+                accumulation_steps=accumulation_steps,
+                tensor_sharded=self.tensor_sharded,
             )
             total_loss += soft_loss / accumulation_steps
 
         self.scheduler.step()
-        if not self.model.is_moe and self.use_dist:
+        if not self.model.is_moe and self.use_dist and not self.tensor_sharded:
             self.average_grads()
         self.optimizer.step()
 
         quantized_weights.clear()
 
-        if self.use_dist:
+        if self.use_dist and not self.tensor_sharded:
             pg = dist.group.WORLD
             t = torch.tensor(total_loss, device=self.device, dtype=torch.float32)
             if self.model.is_moe:
@@ -322,16 +364,28 @@ class QuantizationTrainer:
         soft_weights = self._build_weights('soft', temperature, scale)
         for i in range(accumulation_steps):
             micro_batch = batch[i*microbatch_size:(i+1)*microbatch_size].to(self.device)
-            total_soft_loss += self.model.calculate_mse(micro_batch, soft_weights, self.train_attn, validation=True) / accumulation_steps
+            total_soft_loss += self.model.calculate_mse(
+                micro_batch,
+                soft_weights,
+                self.train_attn,
+                validation=True,
+                tensor_sharded=self.tensor_sharded,
+            ) / accumulation_steps
         soft_weights.clear()
 
         hard_weights = self._build_weights('hard', temperature, scale)
         for i in range(accumulation_steps):
             micro_batch = batch[i*microbatch_size:(i+1)*microbatch_size].to(self.device)
-            total_hard_loss += self.model.calculate_mse(micro_batch, hard_weights, self.train_attn, validation=True) / accumulation_steps
+            total_hard_loss += self.model.calculate_mse(
+                micro_batch,
+                hard_weights,
+                self.train_attn,
+                validation=True,
+                tensor_sharded=self.tensor_sharded,
+            ) / accumulation_steps
         hard_weights.clear()
 
-        if self.use_dist:
+        if self.use_dist and not self.tensor_sharded:
             pg = dist.group.WORLD
             t_soft = torch.tensor(total_soft_loss, device=self.device, dtype=torch.float32)
             t_hard = torch.tensor(total_hard_loss, device=self.device, dtype=torch.float32)
@@ -345,11 +399,46 @@ class QuantizationTrainer:
             total_hard_loss = t_hard.item()
 
         return total_soft_loss, total_hard_loss
+
+    def _gather_hard_mlp_pairs(self, base):
+        pairs = {}
+        for leaf in ("gate_proj", "up_proj", "down_proj"):
+            tensor_name = f"{base}.{leaf}"
+            local_weight, local_scales = self.quantizers[
+                tensor_name
+            ].get_hard_weights()
+
+            full_weight = self.tp.gather_equal_gpu_shards_to_rank0_cpu(
+                tensor_name, local_weight
+            )
+            full_scales = self.tp.gather_equal_gpu_shards_to_rank0_cpu(
+                tensor_name, local_scales, scale_tensor=True
+            )
+
+            if self.global_rank == 0:
+                pairs[leaf] = (full_weight, full_scales)
+
+        return pairs
+
     
     def get_random_batch_indices(self, x, num_samples, batch_size):
-        perm = torch.randperm(num_samples // batch_size)
-        for i in range(num_samples // batch_size):
-            start = perm[i] * batch_size
+        num_batches = num_samples // batch_size
+
+        if self.tensor_sharded:
+            # TP ranks must execute the same samples in the same order.
+            if self.global_rank == 0:
+                perm = torch.randperm(num_batches, device=self.device)
+            else:
+                perm = torch.empty(
+                    num_batches, dtype=torch.long, device=self.device
+                )
+            dist.broadcast(perm, src=0)
+            perm = perm.cpu()
+        else:
+            perm = torch.randperm(num_batches)
+
+        for i in range(num_batches):
+            start = int(perm[i]) * batch_size
             yield x[start:start+batch_size]
 
     def average_grads(self):

@@ -4,10 +4,12 @@ import math
 import gc
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from contextlib import ExitStack
 from safetensors.torch import save_file as safe_save_file
 
 from .base import BaseModelWrapper
+from src.distributed import row_parallel_sum
 from src.evaluation.wiki_eval import *
 from src.prior.gptq import *
 from src.utils.progress_reporter import report_gptq_calib, report_gptq_linear, report_ppl_layer
@@ -142,6 +144,37 @@ class Qwen35Wrapper(BaseModelWrapper):
         hidden_states = current_layer.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
+
+    def forward_sharded_mlp(self, batch, quantized_weights):
+        current_layer = self.get_layer_module(self.current_layer_idx)
+        mlp = current_layer.mlp
+        base = f"{self.get_current_layer()}.mlp"
+
+        gate_w = quantized_weights[f"{base}.gate_proj"]
+        up_w = quantized_weights[f"{base}.up_proj"]
+        down_w = quantized_weights[f"{base}.down_proj"]
+
+        mlp_input = self.get_mlp_input(batch)
+        residual = mlp_input
+        hidden_states = current_layer.post_attention_layernorm(mlp_input)
+
+        if mlp.gate_proj.bias is not None or mlp.up_proj.bias is not None:
+            raise NotImplementedError(
+                "tensor_sharded Qwen3.5 MLP currently assumes bias-free "
+                "gate_proj/up_proj"
+            )
+
+        gate_local = F.linear(hidden_states, gate_w, bias=None)
+        up_local = F.linear(hidden_states, up_w, bias=None)
+        hidden_local = mlp.act_fn(gate_local) * up_local
+        partial = F.linear(hidden_local, down_w, bias=None)
+
+        mlp_out = row_parallel_sum(partial)
+
+        if mlp.down_proj.bias is not None:
+            mlp_out = mlp_out + mlp.down_proj.bias
+
+        return residual + mlp_out
 
     def _layer_prefixes(self, layer_name):
         layer_idx = int(layer_name.split(".")[-1])

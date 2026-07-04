@@ -87,6 +87,7 @@ class EvalConfig:
 @dataclass
 class DistributedConfig:
     timeout_hours: float = 2.0
+    mode: str = "data_parallel"
 
 
 @dataclass
