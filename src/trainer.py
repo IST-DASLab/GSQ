@@ -132,11 +132,11 @@ class QuantizationTrainer:
             epoch_losses = []
             epoch_start = time.time()
 
-            for indices in self.get_random_batch_indices(num_samples, batch_size):
+            for batch in self.get_random_batch_indices(train_all['input'], num_samples, batch_size):
                 temperature = initial_temperature + (final_temperature - initial_temperature) * step / (num_training_steps - 1)
                 scale = initial_scale + (final_scale - initial_scale) * step / (num_training_steps - 1)
                 loss = self.train_step(
-                    train_all['input'][indices],
+                    batch,
                     temperature, 
                     scale,
                     micro
@@ -346,14 +346,11 @@ class QuantizationTrainer:
 
         return total_soft_loss, total_hard_loss
     
-    def get_random_batch_indices(self, num_samples, batch_size):
-        perm = torch.randperm(num_samples)
-        if self.use_dist:
-            perm = perm.to(self.device)
-            dist.broadcast(perm, src=0)
-            perm = perm.cpu()
-        for i in range(0, num_samples, batch_size):
-            yield perm[i:i+batch_size]
+    def get_random_batch_indices(self, x, num_samples, batch_size):
+        perm = torch.randperm(num_samples // batch_size)
+        for i in range(num_samples // batch_size):
+            start = perm[i] * batch_size
+            yield x[start:start+batch_size]
 
     def average_grads(self):
         for group in self.optimizer.param_groups:
