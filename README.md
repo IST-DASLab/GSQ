@@ -177,6 +177,10 @@ NPROC=4 bash scripts/run.sh
 uv run torchrun --standalone --nproc-per-node=4 main.py --config configs/local/config.yaml
 ```
 
+> **Per-GPU memory scales up with `NPROC` for dense models.** Dense runs are **data-parallel**: every rank builds the full set of quantizers for the resident layer and only the calibration batch is split. Per-GPU memory is therefore roughly the single-GPU working set **plus** NCCL communicator overhead (~0.5-0.7 GB per rank), so `NPROC>1` needs *more* headroom per card than `NPROC=1`, not the same. On tight VRAM prefer `NPROC=1`, bumping `NPROC` will not reduce the per-rank floor. (Sharding the weights themselves would require dense tensor parallelism, which GSQ does not implement.)
+>
+> **Debugging OOMs — `expandable_segments`.** The scripts default to `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (set in [`scripts/_common.sh`](scripts/_common.sh)) because it reduces fragmentation on the large target models. On some setups this can surface an out-of-memory condition as a misleading `CUDA driver error: device not ready` instead of a clean OOM. If you hit that, re-run with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` to get an actionable `torch.OutOfMemoryError`.
+
 For multi-node MoE runs (Kimi, Qwen-MoE), set the standard PyTorch distributed env vars (`WORLD_SIZE`, `RANK`, `LOCAL_RANK`, `MASTER_ADDR`, `MASTER_PORT`) on each node before invoking `bash scripts/run.sh`; the launcher will detect them and skip its built-in `torchrun`. The wrappers initialize NCCL from those env vars directly.
 
 ### Per-model recipes
