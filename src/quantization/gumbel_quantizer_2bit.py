@@ -95,8 +95,15 @@ class GumbelSoftmaxFunction(torch.autograd.Function):
         g_q = g_soft_output.unsqueeze(0) * values.view(4, 1, 1)
 
         dot = (g_q * soft_quant).sum(dim=0, keepdim=True)
-        grad_z = soft_quant * (g_q - dot)
 
-        grad_quant_logits = grad_z * scale / temperature
+        # Reuse the freshly-allocated (4, out, in) `g_q` buffer in place for the remaining
+        # arithmetic instead of allocating separate grad_z / grad_quant_logits tensors of the
+        # same shape at each step. The operation order is kept identical to the allocating
+        # version, so the result is bit-for-bit unchanged (verified for fp32 and bf16). This
+        # trims peak backward memory, which matters on 12GB-class cards (see issue #6).
+        g_q.sub_(dot)            # g_q - dot
+        g_q.mul_(soft_quant)     # soft_quant * (g_q - dot)  == grad_z
+        g_q.mul_(scale)
+        g_q.div_(temperature)    # grad_z * scale / temperature  == grad_quant_logits
 
-        return grad_quant_logits.to(quant_logits.dtype), grad_scales, None, None, None, None, None
+        return g_q.to(quant_logits.dtype), grad_scales, None, None, None, None, None
